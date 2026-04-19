@@ -1,0 +1,16 @@
+# Build and release artifacts
+/build/
+/dist/
+
+# Generated SLEIGH output
+*.sla
+
+# Local editor metadata
+/.vscode/
+/.idea/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~

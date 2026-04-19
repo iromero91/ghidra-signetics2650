@@ -1,0 +1,2259 @@
+define endian=big;
+define alignment=1;
+
+define space ram type=ram_space size=2 default;
+define space register type=register_space size=2;
+define space io type=ram_space size=1;
+
+define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
+define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
+
+define bitrange cc1 = psl[7,1];
+define bitrange cc0 = psl[6,1];
+define bitrange idc = psl[5,1];
+define bitrange wc  = psl[3,1];
+define bitrange ovf = psl[2,1];
+define bitrange com = psl[1,1];
+define bitrange c   = psl[0,1];
+define bitrange ii  = psu[3,1];
+
+macro set_cc(val) {
+  if (val == 0) goto <cc_z>;
+  if (val s< 0) goto <cc_n>;
+  cc1 = 0;
+  cc0 = 1;
+  goto <cc_done>;
+<cc_z>
+  cc1 = 0;
+  cc0 = 0;
+  goto <cc_done>;
+<cc_n>
+  cc1 = 1;
+  cc0 = 0;
+<cc_done>
+}
+
+macro add8_set_flags(dst, src) {
+  local cin:1 = 0;
+  if (wc != 0) goto <wc_on>;
+  goto <wc_done>;
+<wc_on>
+  cin = c;
+<wc_done>
+
+  local a:1 = dst;
+  local b:1 = src;
+  local aw:2 = zext(a);
+  local bw:2 = zext(b);
+  local ciw:2 = zext(cin);
+
+  local sum:2 = aw + bw + ciw;
+  local res:1 = sum:1;
+  dst = res;
+
+  if ((sum >> 8) == 0) goto <c_zero>;
+  c = 1;
+  goto <c_done>;
+<c_zero>
+  c = 0;
+<c_done>
+
+  local nibsum:2 = (aw & 0xf) + (bw & 0xf) + ciw;
+  if ((nibsum >> 4) == 0) goto <idc_zero>;
+  idc = 1;
+  goto <idc_done>;
+<idc_zero>
+  idc = 0;
+<idc_done>
+
+  if ((a s< 0) != (b s< 0)) goto <ovf_no>;
+  if ((res s< 0) != (a s< 0)) goto <ovf_yes>;
+<ovf_no>
+  ovf = 0;
+  goto <ovf_done>;
+<ovf_yes>
+  ovf = 1;
+<ovf_done>
+
+  set_cc(res);
+}
+
+macro sub8_set_flags(dst, src) {
+  local bin:1 = 0;
+  if (wc != 0) goto <wc_on>;
+  goto <wc_done>;
+<wc_on>
+  if (c != 0) goto <carry_set>;
+  bin = 1;
+  goto <wc_done>;
+<carry_set>
+  bin = 0;
+<wc_done>
+
+  local a:1 = dst;
+  local b:1 = src;
+  local aw:2 = zext(a);
+  local bw:2 = zext(b);
+  local biw:2 = zext(bin);
+
+  local diff:2 = aw - bw - biw;
+  local res:1 = diff:1;
+  dst = res;
+
+  local subtr:2 = bw + biw;
+  if (aw < subtr) goto <borrow_yes>;
+  c = 1;
+  goto <c_done>;
+<borrow_yes>
+  c = 0;
+<c_done>
+
+  local an:2 = aw & 0xf;
+  local bn:2 = bw & 0xf;
+  local subn:2 = bn + biw;
+  if (an < subn) goto <idc_borrow_yes>;
+  idc = 1;
+  goto <idc_done>;
+<idc_borrow_yes>
+  idc = 0;
+<idc_done>
+
+  if ((a s< 0) == (b s< 0)) goto <ovf_no>;
+  if ((res s< 0) != (a s< 0)) goto <ovf_yes>;
+<ovf_no>
+  ovf = 0;
+  goto <ovf_done>;
+<ovf_yes>
+  ovf = 1;
+<ovf_done>
+
+  set_cc(res);
+}
+
+macro and8_set_cc(dst, src) {
+  dst = dst & src;
+  set_cc(dst);
+}
+
+macro eor8_set_cc(dst, src) {
+  dst = dst ^ src;
+  set_cc(dst);
+}
+
+macro ior8_set_cc(dst, src) {
+  dst = dst | src;
+  set_cc(dst);
+}
+
+macro set_cc_compare(lhs, rhs) {
+  if (lhs == rhs) goto <cmp_eq>;
+
+  # COM=1 -> logical (unsigned) compare, COM=0 -> arithmetic (signed) compare.
+  if (com != 0) goto <cmp_logical>;
+  if (lhs s< rhs) goto <cmp_lt>;
+  goto <cmp_gt>;
+
+<cmp_logical>
+  if (lhs < rhs) goto <cmp_lt>;
+  goto <cmp_gt>;
+
+<cmp_eq>
+  cc1 = 0;
+  cc0 = 0;
+  goto <cmp_done>;
+
+<cmp_lt>
+  cc1 = 1;
+  cc0 = 0;
+  goto <cmp_done>;
+
+<cmp_gt>
+  cc1 = 0;
+  cc0 = 1;
+
+<cmp_done>
+}
+
+macro set_cc_test_under_mask(val, mask) {
+  local t:1 = val & mask;
+  if (t == mask) goto <tmi_eq>;
+  cc1 = 1;
+  cc0 = 0;
+  goto <tmi_done>;
+<tmi_eq>
+  cc1 = 0;
+  cc0 = 0;
+<tmi_done>
+}
+
+
+define token instr8 (8)
+  byte = (0,7)
+  op  = (2,7)
+  reg = (0,1)
+;
+
+# Absolute-address extension token for *A forms (bytes 1+2 as 16-bit BE):
+# byte1 = iccaaaaa (HIGH byte in big-endian token), byte2 = aaaaaaaa (LOW byte)
+define token absaddr_tok (16)
+  ind_abs  = (15,15)  # indirect flag (bit 7 of byte1)
+  idx_ctrl = (13,14)  # 0=none, 1=pre-inc, 2=pre-dec, 3=index-only (bits 6-5 of byte1)
+  ahigh    = (8,12)   # addr[12:8] (bits 4-0 of byte1)
+  alow     = (0,7)    # addr[7:0]  (byte2)
+;
+
+define token imm8_tok (8)
+  imm8 = (0,7)
+;
+
+define token reladdr_tok (8)
+  ind  = (7,7)
+  rel7 = (0,6) signed
+;
+
+attach variables [ reg ] [ r0 r1 r2 r3 ];
+
+# NOP instruction
+:NOP is byte=0xc0 { r0 = r0; }
+
+# HALT instruction (WAIT state)
+:HALT is byte=0x40 unimpl
+
+## Load and Store operations
+
+# 0x00 is explicitly indeterminate on 2650 and not a valid LODZ form.
+:ILL_00 is byte=0x00 unimpl
+
+# LODZ r: valid in hardware for r1..r3 only. The explicit ILL_00 constructor
+# handles the forbidden r0 encoding while this generic form covers 0x01..0x03.
+:LODZ reg is op=0x00 & reg {
+  r0 = reg;
+  set_cc(r0);
+}
+
+# LODI,r v: Load immediate value into register r, set CC on result.
+# Encoding: 000001rr vvvvvvvv  ($04-$07)
+:LODI reg, imm8 is op=0x01 & reg; imm8 {
+  reg = imm8:1;
+  set_cc(reg);
+}
+
+# LODR,r rel: Load from PC-relative address, direct.
+# Encoding: 000010rr 0aaaaaaa  ($08-$0B, i=0)
+# EA = inst_next + sign_extend(rel7)
+:LODR reg, reladdr is op=0x02 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  reg = *[ram]:1 ea;
+  set_cc(reg);
+}
+
+# LODR,r *rel: Load from PC-relative address, indirect.
+# Encoding: 000010rr 1aaaaaaa  ($08-$0B, i=1)
+# EA = *(inst_next + sign_extend(rel7))
+:LODR reg, "*"^reladdr is op=0x02 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local indir:2 = *[ram]:2 ea;
+  reg = *[ram]:1 indir;
+  set_cc(reg);
+}
+
+
+# --- LODA (Load Absolute) ---
+# 3 bytes: 000011rr iccaaaaa aaaaaaaa  ($0C-$0F)
+# Effective address = (ahigh << 8) | alow  (13-bit)
+# idx_ctrl=0: non-indexed, destination = reg
+# idx_ctrl=1/2/3: indexed, destination forced to r0, reg is the index register
+
+# Non-indexed direct: rn = *(abs)
+:LODA reg, absaddr is op=0x03 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  reg = *[ram]:1 ea;
+  set_cc(reg);
+}
+
+# Non-indexed indirect: rn = *(*(abs))
+:LODA reg, "*"^absaddr is op=0x03 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local indir:2 = *[ram]:2 ea;
+  reg = *[ram]:1 indir;
+  set_cc(reg);
+}
+
+# Indexed-only direct: r0 = *(abs + rn)
+:LODA "r0, "^absaddr^", "^reg is op=0x03 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (ea + idx);
+  set_cc(r0);
+}
+
+# Indexed-only indirect: r0 = *(*(abs) + rn)
+:LODA "r0, *"^absaddr^", "^reg is op=0x03 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (base + idx);
+  set_cc(r0);
+}
+
+# Pre-increment direct: ++rn; r0 = *(abs + rn)
+:LODA "r0, "^absaddr^", "^reg^"+" is op=0x03 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (ea + idx);
+  set_cc(r0);
+}
+
+# Pre-increment indirect: ++rn; r0 = *(*(abs) + rn)
+:LODA "r0, *"^absaddr^", "^reg^"+" is op=0x03 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (base + idx);
+  set_cc(r0);
+}
+
+# Pre-decrement direct: --rn; r0 = *(abs + rn)
+:LODA "r0, "^absaddr^", "^reg^"-" is op=0x03 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (ea + idx);
+  set_cc(r0);
+}
+
+# Pre-decrement indirect: --rn; r0 = *(*(abs) + rn)
+:LODA "r0, *"^absaddr^", "^reg^"-" is op=0x03 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  r0 = *[ram]:1 (base + idx);
+  set_cc(r0);
+}
+
+# STRZ r: store register zero into register r.
+# The generic pattern includes 0xC0, but explicit NOP at 0xC0 is defined
+# separately and should remain the selected decode for that opcode.
+:STRZ reg is op=0x30 & reg {
+  reg = r0;
+  set_cc(reg);
+}
+
+# STRR,r rel: store register to PC-relative address, direct.
+# Encoding: 110010rr 0aaaaaaa  ($C8-$CB, i=0)
+:STRR reg, reladdr is op=0x32 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  *[ram]:1 ea = reg;
+}
+
+# STRR,r *rel: store register to PC-relative indirect address.
+# Encoding: 110010rr 1aaaaaaa  ($C8-$CB, i=1)
+:STRR reg, "*"^reladdr is op=0x32 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  *[ram]:1 ptr = reg;
+}
+
+# --- STRA (Store Absolute) ---
+# 3 bytes: 110011rr iccaaaaa aaaaaaaa  ($CC-$CF)
+# idx_ctrl=0: source = reg
+# idx_ctrl=1/2/3: indexed mode, source forced to r0 and reg is index register
+
+# Non-indexed direct: *(abs) = rn
+:STRA reg, absaddr is op=0x33 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  *[ram]:1 ea = reg;
+}
+
+# Non-indexed indirect: *(*(abs)) = rn
+:STRA reg, "*"^absaddr is op=0x33 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  *[ram]:1 ptr = reg;
+}
+
+# Indexed-only direct: *(abs + rn) = r0
+:STRA "r0, "^absaddr^", "^reg is op=0x33 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  *[ram]:1 (ea + idx) = r0;
+}
+
+# Indexed-only indirect: *(*(abs) + rn) = r0
+:STRA "r0, *"^absaddr^", "^reg is op=0x33 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  *[ram]:1 (base + idx) = r0;
+}
+
+# Pre-increment direct: ++rn; *(abs + rn) = r0
+:STRA "r0, "^absaddr^", "^reg^"+" is op=0x33 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  *[ram]:1 (ea + idx) = r0;
+}
+
+# Pre-increment indirect: ++rn; *(*(abs) + rn) = r0
+:STRA "r0, *"^absaddr^", "^reg^"+" is op=0x33 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  *[ram]:1 (base + idx) = r0;
+}
+
+# Pre-decrement direct: --rn; *(abs + rn) = r0
+:STRA "r0, "^absaddr^", "^reg^"-" is op=0x33 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  *[ram]:1 (ea + idx) = r0;
+}
+
+# Pre-decrement indirect: --rn; *(*(abs) + rn) = r0
+:STRA "r0, *"^absaddr^", "^reg^"-" is op=0x33 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  *[ram]:1 (base + idx) = r0;
+}
+
+
+## Arithmetic operations
+
+# ADDZ reg: add selected register to r0 and store in r0.
+:ADDZ reg is op=0x20 & reg {
+  add8_set_flags(r0, reg);
+}
+
+# ADDI,r v: add immediate value to register r.
+# Encoding: 100001rr vvvvvvvv  ($84-$87)
+:ADDI reg, imm8 is op=0x21 & reg; imm8 {
+  add8_set_flags(reg, imm8:1);
+}
+
+# ADDR,r rel: add value at PC-relative address to register r (direct).
+# Encoding: 100010rr 0aaaaaaa  ($88-$8B, i=0)
+:ADDR reg, reladdr is op=0x22 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  add8_set_flags(reg, m);
+}
+
+# ADDR,r *rel: add value at PC-relative indirect address to register r.
+# Encoding: 100010rr 1aaaaaaa  ($88-$8B, i=1)
+:ADDR reg, "*"^reladdr is op=0x22 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  add8_set_flags(reg, m);
+}
+
+# --- ADDA (Add Absolute) ---
+# 3 bytes: 100011rr iccaaaaa aaaaaaaa  ($8C-$8F)
+# idx_ctrl=0: destination = reg
+# idx_ctrl=1/2/3: indexed mode, destination forced to r0, reg is index register
+
+# Non-indexed direct: rn += *(abs)
+:ADDA reg, absaddr is op=0x23 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  add8_set_flags(reg, m);
+}
+
+# Non-indexed indirect: rn += *(*(abs))
+:ADDA reg, "*"^absaddr is op=0x23 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  add8_set_flags(reg, m);
+}
+
+# Indexed-only direct: r0 += *(abs + rn)
+:ADDA "r0, "^absaddr^", "^reg is op=0x23 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  add8_set_flags(r0, m);
+}
+
+# Indexed-only indirect: r0 += *(*(abs) + rn)
+:ADDA "r0, *"^absaddr^", "^reg is op=0x23 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  add8_set_flags(r0, m);
+}
+
+# Pre-increment direct: ++rn; r0 += *(abs + rn)
+:ADDA "r0, "^absaddr^", "^reg^"+" is op=0x23 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  add8_set_flags(r0, m);
+}
+
+# Pre-increment indirect: ++rn; r0 += *(*(abs) + rn)
+:ADDA "r0, *"^absaddr^", "^reg^"+" is op=0x23 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  add8_set_flags(r0, m);
+}
+
+# Pre-decrement direct: --rn; r0 += *(abs + rn)
+:ADDA "r0, "^absaddr^", "^reg^"-" is op=0x23 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  add8_set_flags(r0, m);
+}
+
+# Pre-decrement indirect: --rn; r0 += *(*(abs) + rn)
+:ADDA "r0, *"^absaddr^", "^reg^"-" is op=0x23 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  add8_set_flags(r0, m);
+}
+
+# SUBZ reg: subtract selected register from r0.
+# Encoding: 101000rr  ($A0-$A3)
+:SUBZ reg is op=0x28 & reg {
+  sub8_set_flags(r0, reg);
+}
+
+# SUBI,r v: subtract immediate value from register r.
+# Encoding: 101001rr vvvvvvvv  ($A4-$A7)
+:SUBI reg, imm8 is op=0x29 & reg; imm8 {
+  sub8_set_flags(reg, imm8:1);
+}
+
+# SUBR,r rel: subtract value at PC-relative address from register r (direct).
+# Encoding: 101010rr 0aaaaaaa  ($A8-$AB, i=0)
+:SUBR reg, reladdr is op=0x2a & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  sub8_set_flags(reg, m);
+}
+
+# SUBR,r *rel: subtract value at PC-relative indirect address from register r.
+# Encoding: 101010rr 1aaaaaaa  ($A8-$AB, i=1)
+:SUBR reg, "*"^reladdr is op=0x2a & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  sub8_set_flags(reg, m);
+}
+
+# --- SUBA (Subtract Absolute) ---
+# 3 bytes: 101011rr iccaaaaa aaaaaaaa  ($AC-$AF)
+# idx_ctrl=0: destination = reg
+# idx_ctrl=1/2/3: indexed mode, destination forced to r0, reg is index register
+
+# Non-indexed direct: rn -= *(abs)
+:SUBA reg, absaddr is op=0x2b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  sub8_set_flags(reg, m);
+}
+
+# Non-indexed indirect: rn -= *(*(abs))
+:SUBA reg, "*"^absaddr is op=0x2b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  sub8_set_flags(reg, m);
+}
+
+# Indexed-only direct: r0 -= *(abs + rn)
+:SUBA "r0, "^absaddr^", "^reg is op=0x2b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  sub8_set_flags(r0, m);
+}
+
+# Indexed-only indirect: r0 -= *(*(abs) + rn)
+:SUBA "r0, *"^absaddr^", "^reg is op=0x2b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  sub8_set_flags(r0, m);
+}
+
+# Pre-increment direct: ++rn; r0 -= *(abs + rn)
+:SUBA "r0, "^absaddr^", "^reg^"+" is op=0x2b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  sub8_set_flags(r0, m);
+}
+
+# Pre-increment indirect: ++rn; r0 -= *(*(abs) + rn)
+:SUBA "r0, *"^absaddr^", "^reg^"+" is op=0x2b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  sub8_set_flags(r0, m);
+}
+
+# Pre-decrement direct: --rn; r0 -= *(abs + rn)
+:SUBA "r0, "^absaddr^", "^reg^"-" is op=0x2b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  sub8_set_flags(r0, m);
+}
+
+# Pre-decrement indirect: --rn; r0 -= *(*(abs) + rn)
+:SUBA "r0, *"^absaddr^", "^reg^"-" is op=0x2b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  sub8_set_flags(r0, m);
+}
+
+
+## Logical operations
+
+# EORZ reg: r0 ^= reg
+# Encoding: 001000rr  ($20-$23)
+:EORZ reg is op=0x08 & reg {
+  eor8_set_cc(r0, reg);
+}
+
+# EORI,r v: reg ^= imm
+# Encoding: 001001rr vvvvvvvv  ($24-$27)
+:EORI reg, imm8 is op=0x09 & reg; imm8 {
+  eor8_set_cc(reg, imm8:1);
+}
+
+# EORR,r rel: reg ^= *(rel)
+# Encoding: 001010rr 0aaaaaaa  ($28-$2B, i=0)
+:EORR reg, reladdr is op=0x0a & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  eor8_set_cc(reg, m);
+}
+
+# EORR,r *rel: reg ^= *(*(rel))
+# Encoding: 001010rr 1aaaaaaa  ($28-$2B, i=1)
+:EORR reg, "*"^reladdr is op=0x0a & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  eor8_set_cc(reg, m);
+}
+
+# --- EORA (Exclusive OR Absolute) ---
+# 3 bytes: 001011rr iccaaaaa aaaaaaaa  ($2C-$2F)
+# idx_ctrl=0: destination = reg
+# idx_ctrl=1/2/3: indexed mode, destination forced to r0, reg is index register
+
+# Non-indexed direct: rn ^= *(abs)
+:EORA reg, absaddr is op=0x0b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  eor8_set_cc(reg, m);
+}
+
+# Non-indexed indirect: rn ^= *(*(abs))
+:EORA reg, "*"^absaddr is op=0x0b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  eor8_set_cc(reg, m);
+}
+
+# Indexed-only direct: r0 ^= *(abs + rn)
+:EORA "r0, "^absaddr^", "^reg is op=0x0b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  eor8_set_cc(r0, m);
+}
+
+# Indexed-only indirect: r0 ^= *(*(abs) + rn)
+:EORA "r0, *"^absaddr^", "^reg is op=0x0b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  eor8_set_cc(r0, m);
+}
+
+# Pre-increment direct: ++rn; r0 ^= *(abs + rn)
+:EORA "r0, "^absaddr^", "^reg^"+" is op=0x0b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  eor8_set_cc(r0, m);
+}
+
+# Pre-increment indirect: ++rn; r0 ^= *(*(abs) + rn)
+:EORA "r0, *"^absaddr^", "^reg^"+" is op=0x0b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  eor8_set_cc(r0, m);
+}
+
+# Pre-decrement direct: --rn; r0 ^= *(abs + rn)
+:EORA "r0, "^absaddr^", "^reg^"-" is op=0x0b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  eor8_set_cc(r0, m);
+}
+
+# Pre-decrement indirect: --rn; r0 ^= *(*(abs) + rn)
+:EORA "r0, *"^absaddr^", "^reg^"-" is op=0x0b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  eor8_set_cc(r0, m);
+}
+
+# ANDZ reg: r0 &= reg. 0x40 is HALT and decoded separately.
+# Encoding: 010000rr  ($40-$43)
+:ANDZ reg is op=0x10 & reg {
+  and8_set_cc(r0, reg);
+}
+
+# ANDI,r v: reg &= imm
+# Encoding: 010001rr vvvvvvvv  ($44-$47)
+:ANDI reg, imm8 is op=0x11 & reg; imm8 {
+  and8_set_cc(reg, imm8:1);
+}
+
+# ANDR,r rel: reg &= *(rel)
+# Encoding: 010010rr 0aaaaaaa  ($48-$4B, i=0)
+:ANDR reg, reladdr is op=0x12 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  and8_set_cc(reg, m);
+}
+
+# ANDR,r *rel: reg &= *(*(rel))
+# Encoding: 010010rr 1aaaaaaa  ($48-$4B, i=1)
+:ANDR reg, "*"^reladdr is op=0x12 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  and8_set_cc(reg, m);
+}
+
+# --- ANDA (AND Absolute) ---
+# 3 bytes: 010011rr iccaaaaa aaaaaaaa  ($4C-$4F)
+# idx_ctrl=0: destination = reg
+# idx_ctrl=1/2/3: indexed mode, destination forced to r0, reg is index register
+
+# Non-indexed direct: rn &= *(abs)
+:ANDA reg, absaddr is op=0x13 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  and8_set_cc(reg, m);
+}
+
+# Non-indexed indirect: rn &= *(*(abs))
+:ANDA reg, "*"^absaddr is op=0x13 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  and8_set_cc(reg, m);
+}
+
+# Indexed-only direct: r0 &= *(abs + rn)
+:ANDA "r0, "^absaddr^", "^reg is op=0x13 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  and8_set_cc(r0, m);
+}
+
+# Indexed-only indirect: r0 &= *(*(abs) + rn)
+:ANDA "r0, *"^absaddr^", "^reg is op=0x13 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  and8_set_cc(r0, m);
+}
+
+# Pre-increment direct: ++rn; r0 &= *(abs + rn)
+:ANDA "r0, "^absaddr^", "^reg^"+" is op=0x13 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  and8_set_cc(r0, m);
+}
+
+# Pre-increment indirect: ++rn; r0 &= *(*(abs) + rn)
+:ANDA "r0, *"^absaddr^", "^reg^"+" is op=0x13 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  and8_set_cc(r0, m);
+}
+
+# Pre-decrement direct: --rn; r0 &= *(abs + rn)
+:ANDA "r0, "^absaddr^", "^reg^"-" is op=0x13 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  and8_set_cc(r0, m);
+}
+
+# Pre-decrement indirect: --rn; r0 &= *(*(abs) + rn)
+:ANDA "r0, *"^absaddr^", "^reg^"-" is op=0x13 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  and8_set_cc(r0, m);
+}
+
+# IORZ reg: r0 |= reg
+# Encoding: 011000rr  ($60-$63)
+:IORZ reg is op=0x18 & reg {
+  ior8_set_cc(r0, reg);
+}
+
+# IORI,r v: reg |= imm
+# Encoding: 011001rr vvvvvvvv  ($64-$67)
+:IORI reg, imm8 is op=0x19 & reg; imm8 {
+  ior8_set_cc(reg, imm8:1);
+}
+
+# IORR,r rel: reg |= *(rel)
+# Encoding: 011010rr 0aaaaaaa  ($68-$6B, i=0)
+:IORR reg, reladdr is op=0x1a & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  ior8_set_cc(reg, m);
+}
+
+# IORR,r *rel: reg |= *(*(rel))
+# Encoding: 011010rr 1aaaaaaa  ($68-$6B, i=1)
+:IORR reg, "*"^reladdr is op=0x1a & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  ior8_set_cc(reg, m);
+}
+
+# --- IORA (Inclusive OR Absolute) ---
+# 3 bytes: 011011rr iccaaaaa aaaaaaaa  ($6C-$6F)
+# idx_ctrl=0: destination = reg
+# idx_ctrl=1/2/3: indexed mode, destination forced to r0, reg is index register
+
+# Non-indexed direct: rn |= *(abs)
+:IORA reg, absaddr is op=0x1b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  ior8_set_cc(reg, m);
+}
+
+# Non-indexed indirect: rn |= *(*(abs))
+:IORA reg, "*"^absaddr is op=0x1b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  ior8_set_cc(reg, m);
+}
+
+# Indexed-only direct: r0 |= *(abs + rn)
+:IORA "r0, "^absaddr^", "^reg is op=0x1b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  ior8_set_cc(r0, m);
+}
+
+# Indexed-only indirect: r0 |= *(*(abs) + rn)
+:IORA "r0, *"^absaddr^", "^reg is op=0x1b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  ior8_set_cc(r0, m);
+}
+
+# Pre-increment direct: ++rn; r0 |= *(abs + rn)
+:IORA "r0, "^absaddr^", "^reg^"+" is op=0x1b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  ior8_set_cc(r0, m);
+}
+
+# Pre-increment indirect: ++rn; r0 |= *(*(abs) + rn)
+:IORA "r0, *"^absaddr^", "^reg^"+" is op=0x1b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  ior8_set_cc(r0, m);
+}
+
+# Pre-decrement direct: --rn; r0 |= *(abs + rn)
+:IORA "r0, "^absaddr^", "^reg^"-" is op=0x1b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  ior8_set_cc(r0, m);
+}
+
+# Pre-decrement indirect: --rn; r0 |= *(*(abs) + rn)
+:IORA "r0, *"^absaddr^", "^reg^"-" is op=0x1b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  ior8_set_cc(r0, m);
+}
+
+# RRR,r: rotate register right.
+# Encoding: 010100rr  ($50-$53)
+:RRR reg is op=0x14 & reg {
+  local old:1 = reg;
+  local oldc:1 = c;
+
+  if (wc != 0) goto <rrr_wc_on>;
+
+  # WC=0: pure 8-bit rotate, C/IDC unchanged.
+  local wrap:1 = old << 7;
+  reg = (old >> 1) | wrap;
+  goto <rrr_rot_done>;
+
+<rrr_wc_on>
+  # WC=1: 9-bit rotate through C.
+  local outc:1 = old & 1;
+  reg = (old >> 1) | (oldc << 7);
+  c = outc;
+  idc = (old >> 6) & 1;
+
+<rrr_rot_done>
+  # OVF set if sign bit changed by rotate, else clear.
+  if ((old s< 0) != (reg s< 0)) goto <rrr_ovf_yes>;
+  ovf = 0;
+  goto <rrr_ovf_done>;
+<rrr_ovf_yes>
+  ovf = 1;
+<rrr_ovf_done>
+
+  set_cc(reg);
+}
+
+# RRL,r: rotate register left.
+# Encoding: 110100rr  ($D0-$D3)
+:RRL reg is op=0x34 & reg {
+  local old:1 = reg;
+  local oldc:1 = c;
+
+  if (wc != 0) goto <rrl_wc_on>;
+
+  # WC=0: pure 8-bit rotate, C/IDC unchanged.
+  local wrap:1 = old >> 7;
+  reg = (old << 1) | wrap;
+  goto <rrl_rot_done>;
+
+<rrl_wc_on>
+  # WC=1: 9-bit rotate through C.
+  local outc:1 = old >> 7;
+  reg = (old << 1) | oldc;
+  c = outc;
+  idc = (old >> 4) & 1;
+
+<rrl_rot_done>
+  # OVF set if sign bit changed by rotate, else clear.
+  if ((old s< 0) != (reg s< 0)) goto <rrl_ovf_yes>;
+  ovf = 0;
+  goto <rrl_ovf_done>;
+<rrl_ovf_yes>
+  ovf = 1;
+<rrl_ovf_done>
+
+  set_cc(reg);
+}
+
+# DAR,r: decimal adjust register.
+# Encoding: 100101rr  ($94-$97)
+# Adds $AA/$A0/$0A/$00 based on C and IDC bits. C and IDC are not changed.
+# CC is set to a meaningless value per the manual; we set it normally.
+:DAR reg is op=0x25 & reg {
+  local adj:1 = 0xAA;
+  if (c != 0) goto <c_set>;
+  if (idc != 0) goto <idc_set_c0>;
+  # C=0, IDC=0 → add $AA (adj already set)
+  goto <do_adj>;
+<idc_set_c0>
+  # C=0, IDC=1 → add $A0
+  adj = 0xA0;
+  goto <do_adj>;
+<c_set>
+  if (idc != 0) goto <both_set>;
+  # C=1, IDC=0 → add $0A
+  adj = 0x0A;
+  goto <do_adj>;
+<both_set>
+  # C=1, IDC=1 → add $00 (no change)
+  adj = 0x00;
+<do_adj>
+  reg = reg + adj;
+  set_cc(reg);
+}
+
+
+## Branch operations
+
+# BCTR,v rel: branch on condition true, relative.
+# Encoding: 000110vv iaaaaaaa  ($18-$1B)
+
+# BCTR,eq rel
+:BCTR "eq, "^reladdr is byte=0x18; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,gt rel
+:BCTR "gt, "^reladdr is byte=0x19; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,lt rel
+:BCTR "lt, "^reladdr is byte=0x1a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,un rel
+:BCTR "un, "^reladdr is byte=0x1b; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  goto [target];
+}
+
+# BCTR,eq *rel
+:BCTR "eq, *"^reladdr is byte=0x18; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,gt *rel
+:BCTR "gt, *"^reladdr is byte=0x19; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,lt *rel
+:BCTR "lt, *"^reladdr is byte=0x1a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTR,un *rel
+:BCTR "un, *"^reladdr is byte=0x1b; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  goto [target];
+}
+
+# BCTA,v abs: branch on condition true, absolute.
+# Encoding: 000111vv ippaaaaa aaaaaaaa  ($1C-$1F)
+
+# BCTA,eq abs
+:BCTA "eq, "^absaddr is byte=0x1c; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,gt abs
+:BCTA "gt, "^absaddr is byte=0x1d; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,lt abs
+:BCTA "lt, "^absaddr is byte=0x1e; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,un abs
+:BCTA "un, "^absaddr is byte=0x1f; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  goto [target];
+}
+
+# BCTA,eq *abs
+:BCTA "eq, *"^absaddr is byte=0x1c; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,gt *abs
+:BCTA "gt, *"^absaddr is byte=0x1d; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,lt *abs
+:BCTA "lt, *"^absaddr is byte=0x1e; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BCTA,un *abs
+:BCTA "un, *"^absaddr is byte=0x1f; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  goto [target];
+}
+
+# BCFR,v rel: branch on condition FALSE, relative.
+# Encoding: 100110vv iaaaaaaa  ($98-$9A; $9B is ZBRR)
+# Branch taken when CC does NOT match v.
+
+# BCFR,eq rel  (branch if CC != eq)
+:BCFR "eq, "^reladdr is byte=0x98; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [ea];
+<done>
+}
+
+# BCFR,gt rel  (branch if CC != gt)
+:BCFR "gt, "^reladdr is byte=0x99; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  goto [ea];
+<done>
+}
+
+# BCFR,lt rel  (branch if CC != lt)
+:BCFR "lt, "^reladdr is byte=0x9a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [ea];
+<done>
+}
+
+# BCFR,eq *rel
+:BCFR "eq, *"^reladdr is byte=0x98; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFR,gt *rel
+:BCFR "gt, *"^reladdr is byte=0x99; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFR,lt *rel
+:BCFR "lt, *"^reladdr is byte=0x9a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,v abs: branch on condition FALSE, absolute.
+# Encoding: 100111vv ippaaaaa aaaaaaaa  ($9C-$9E; $9F is BXA)
+# Branch taken when CC does NOT match v. Page bits ignored (see known-limitations).
+
+# BCFA,eq abs  (branch if CC != eq)
+:BCFA "eq, "^absaddr is byte=0x9c; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,gt abs  (branch if CC != gt)
+:BCFA "gt, "^absaddr is byte=0x9d; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,lt abs  (branch if CC != lt)
+:BCFA "lt, "^absaddr is byte=0x9e; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,eq *abs
+:BCFA "eq, *"^absaddr is byte=0x9c; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,gt *abs
+:BCFA "gt, *"^absaddr is byte=0x9d; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BCFA,lt *abs
+:BCFA "lt, *"^absaddr is byte=0x9e; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  goto [target];
+<done>
+}
+
+# BXA abs,r3: branch indexed, absolute.
+# Encoding: 10011111 ippaaaaa aaaaaaaa  ($9F)
+# Unconditional; r3 is always the index. Page bits ignored (see known-limitations).
+
+# BXA abs,r3
+:BXA absaddr",r3" is byte=0x9f; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local base:2 = (ahigh << 8) | alow;
+  local target:2 = base + zext(r3);
+  goto [target];
+}
+
+# BXA *abs,r3
+:BXA "*"^absaddr",r3" is byte=0x9f; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local target:2 = base + zext(r3);
+  goto [target];
+}
+
+# ZBRR: zero branch, relative.
+# Encoding: 10011011 iaaaaaaa  ($9B)
+# Target = signed displacement from address 0, masked to 13 bits (page bits cleared).
+
+# ZBRR zero
+:ZBRR reladdr is byte=0x9b; ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local target:2 = sext(rel7:1) & 0x1fff;
+  goto [target];
+}
+
+# ZBRR *zero
+:ZBRR "*"^reladdr is byte=0x9b; ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local ea:2 = sext(rel7:1) & 0x1fff;
+  local target:2 = *[ram]:2 ea;
+  goto [target];
+}
+
+# BRNR,r rel: branch on register non-zero, relative.
+# Encoding: 010110rr iaaaaaaa  ($58-$5B)
+
+# BRNR,r rel
+:BRNR reg, reladdr is op=0x16 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BRNR,r *rel
+:BRNR reg, "*"^reladdr is op=0x16 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BRNA,r abs: branch on register non-zero, absolute.
+# Encoding: 010111rr ippaaaaa aaaaaaaa  ($5C-$5F)
+# Page bits ignored (see known-limitations).
+
+# BRNA,r abs
+:BRNA reg, absaddr is op=0x17 & reg; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BRNA,r *abs
+:BRNA reg, "*"^absaddr is op=0x17 & reg; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BIRR,r rel: branch on incrementing register, relative.
+# Encoding: 110110rr iaaaaaaa  ($D8-$DB)
+
+# BIRR,r rel
+:BIRR reg, reladdr is op=0x36 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  reg = reg + 1;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BIRR,r *rel
+:BIRR reg, "*"^reladdr is op=0x36 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  reg = reg + 1;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BIRA,r abs: branch on incrementing register, absolute.
+# Encoding: 110111rr ippaaaaa aaaaaaaa  ($DC-$DF)
+# Page bits ignored (see known-limitations).
+
+# BIRA,r abs
+:BIRA reg, absaddr is op=0x37 & reg; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  reg = reg + 1;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BIRA,r *abs
+:BIRA reg, "*"^absaddr is op=0x37 & reg; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  reg = reg + 1;
+  if (reg == 0) goto <done>;
+  goto [target];
+<done>
+}
+
+# BDRR,r rel: branch on decrementing register, relative.
+# Encoding: 111110rr iaaaaaaa  ($F8-$FB)
+
+# BDRR,r rel
+:BDRR reg, reladdr is op=0x3e & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  local dest:2 = inst_next;
+  reg = reg - 1;
+  if (reg == 0) goto <done>;
+  dest = target;
+<done>
+  goto [dest];
+}
+
+# BDRR,r *rel
+:BDRR reg, "*"^reladdr is op=0x3e & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  local dest:2 = inst_next;
+  reg = reg - 1;
+  if (reg == 0) goto <done>;
+  dest = target;
+<done>
+  goto [dest];
+}
+
+# BDRA,r abs: branch on decrementing register, absolute.
+# Encoding: 111111rr ippaaaaa aaaaaaaa  ($FC-$FF)
+# Page bits ignored (see known-limitations).
+
+# BDRA,r abs
+:BDRA reg, absaddr is op=0x3f & reg; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  local dest:2 = inst_next;
+  reg = reg - 1;
+  if (reg == 0) goto <done>;
+  dest = target;
+<done>
+  goto [dest];
+}
+
+# BDRA,r *abs
+:BDRA reg, "*"^absaddr is op=0x3f & reg; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  local dest:2 = inst_next;
+  reg = reg - 1;
+  if (reg == 0) goto <done>;
+  dest = target;
+<done>
+  goto [dest];
+}
+
+
+## Subroutine branch operations
+# Subroutine calls push the return address onto the hardware Return Address Stack (RAS).
+# Modeled with SLEIGH 'call' which generates CALLIND p-code.
+
+# BSTR,v rel: branch to subroutine on condition true, relative.
+# Encoding: 001110vv iaaaaaaa  ($38-$3B)
+
+# BSTR,eq rel
+:BSTR "eq, "^reladdr is byte=0x38; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,gt rel
+:BSTR "gt, "^reladdr is byte=0x39; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,lt rel
+:BSTR "lt, "^reladdr is byte=0x3a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,un rel
+:BSTR "un, "^reladdr is byte=0x3b; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  call [target];
+}
+
+# BSTR,eq *rel
+:BSTR "eq, *"^reladdr is byte=0x38; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,gt *rel
+:BSTR "gt, *"^reladdr is byte=0x39; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,lt *rel
+:BSTR "lt, *"^reladdr is byte=0x3a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTR,un *rel
+:BSTR "un, *"^reladdr is byte=0x3b; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  call [target];
+}
+
+# BSTA,v abs: branch to subroutine on condition true, absolute.
+# Encoding: 001111vv ippaaaaa aaaaaaaa  ($3C-$3F)
+# Page bits ignored (see known-limitations).
+
+# BSTA,eq abs
+:BSTA "eq, "^absaddr is byte=0x3c; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,gt abs
+:BSTA "gt, "^absaddr is byte=0x3d; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,lt abs
+:BSTA "lt, "^absaddr is byte=0x3e; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,un abs
+:BSTA "un, "^absaddr is byte=0x3f; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  call [target];
+}
+
+# BSTA,eq *abs
+:BSTA "eq, *"^absaddr is byte=0x3c; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,gt *abs
+:BSTA "gt, *"^absaddr is byte=0x3d; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,lt *abs
+:BSTA "lt, *"^absaddr is byte=0x3e; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSTA,un *abs
+:BSTA "un, *"^absaddr is byte=0x3f; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  call [target];
+}
+
+# BSFR,v rel: branch to subroutine on condition false, relative.
+# Encoding: 101110vv iaaaaaaa  ($B8-$BA; $BB is ZBSR)
+
+# BSFR,eq rel  (call if CC != eq)
+:BSFR "eq, "^reladdr is byte=0xb8; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFR,gt rel  (call if CC != gt)
+:BSFR "gt, "^reladdr is byte=0xb9; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFR,lt rel  (call if CC != lt)
+:BSFR "lt, "^reladdr is byte=0xba; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFR,eq *rel
+:BSFR "eq, *"^reladdr is byte=0xb8; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFR,gt *rel
+:BSFR "gt, *"^reladdr is byte=0xb9; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFR,lt *rel
+:BSFR "lt, *"^reladdr is byte=0xba; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,v abs: branch to subroutine on condition false, absolute.
+# Encoding: 101111vv ippaaaaa aaaaaaaa  ($BC-$BE; $BF is BSXA)
+# Page bits ignored (see known-limitations).
+
+# BSFA,eq abs  (call if CC != eq)
+:BSFA "eq, "^absaddr is byte=0xbc; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,gt abs  (call if CC != gt)
+:BSFA "gt, "^absaddr is byte=0xbd; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,lt abs  (call if CC != lt)
+:BSFA "lt, "^absaddr is byte=0xbe; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,eq *abs
+:BSFA "eq, *"^absaddr is byte=0xbc; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,gt *abs
+:BSFA "gt, *"^absaddr is byte=0xbd; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 != 0) goto <take>;
+  if (cc0 != 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# BSFA,lt *abs
+:BSFA "lt, *"^absaddr is byte=0xbe; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (cc1 == 0) goto <take>;
+  if (cc0 == 0) goto <done>;
+<take>
+  call [target];
+<done>
+}
+
+# ZBSR: zero branch to subroutine, relative.
+# Encoding: 10111011 iaaaaaaa  ($BB)
+# Target = signed displacement from address 0, masked to 13 bits (page bits cleared).
+
+# BSNR,r rel: branch to subroutine on register non-zero, relative.
+# Encoding: 011110rr iaaaaaaa  ($78-$7B)
+
+# BSNR,r rel
+:BSNR reg, reladdr is op=0x1e & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local target:2 = inst_next + rel7;
+  if (reg == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSNR,r *rel
+:BSNR reg, "*"^reladdr is op=0x1e & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local target:2 = *[ram]:2 ea;
+  if (reg == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSNA,r abs: branch to subroutine on register non-zero, absolute.
+# Encoding: 011111rr ippaaaaa aaaaaaaa  ($7C-$7F)
+# Page bits ignored (see known-limitations).
+
+# BSNA,r abs
+:BSNA reg, absaddr is op=0x1f & reg; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  if (reg == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSNA,r *abs
+:BSNA reg, "*"^absaddr is op=0x1f & reg; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local target:2 = *[ram]:2 ea;
+  if (reg == 0) goto <done>;
+  call [target];
+<done>
+}
+
+# BSXA abs,r3: branch to subroutine indexed, absolute.
+# Encoding: 10111111 ippaaaaa aaaaaaaa  ($BF)
+# Unconditional; r3 always the index. Page bits ignored (see known-limitations).
+
+# BSXA abs,r3
+:BSXA absaddr",r3" is byte=0xbf; ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local base:2 = (ahigh << 8) | alow;
+  local target:2 = base + zext(r3);
+  call [target];
+}
+
+# BSXA *abs,r3
+:BSXA "*"^absaddr",r3" is byte=0xbf; ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local target:2 = base + zext(r3);
+  call [target];
+}
+
+# ZBSR zero
+:ZBSR reladdr is byte=0xbb; ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local target:2 = sext(rel7:1) & 0x1fff;
+  call [target];
+}
+
+# ZBSR *zero
+:ZBSR "*"^reladdr is byte=0xbb; ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local ea:2 = sext(rel7:1) & 0x1fff;
+  local target:2 = *[ram]:2 ea;
+  call [target];
+}
+
+# RETC,v: return from subroutine, conditional.
+# Encoding: 000101vv  ($14-$17)
+# Pops RAS and branches back when CC matches v; v=3 is unconditional.
+
+:RETC "eq" is byte=0x14 {
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  return [ras0];
+<done>
+}
+
+:RETC "gt" is byte=0x15 {
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  return [ras0];
+<done>
+}
+
+:RETC "lt" is byte=0x16 {
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  return [ras0];
+<done>
+}
+
+:RETC "un" is byte=0x17 {
+  return [ras0];
+}
+
+# RETE,v: return from subroutine and enable interrupts, conditional.
+# Encoding: 001101vv  ($34-$37)
+# Same as RETC but also clears II (interrupt inhibit) bit in PSU on return.
+
+:RETE "eq" is byte=0x34 {
+  if (cc1 != 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  ii = 0;
+  return [ras0];
+<done>
+}
+
+:RETE "gt" is byte=0x35 {
+  if (cc1 != 0) goto <done>;
+  if (cc0 == 0) goto <done>;
+  ii = 0;
+  return [ras0];
+<done>
+}
+
+:RETE "lt" is byte=0x36 {
+  if (cc1 == 0) goto <done>;
+  if (cc0 != 0) goto <done>;
+  ii = 0;
+  return [ras0];
+<done>
+}
+
+:RETE "un" is byte=0x37 {
+  ii = 0;
+  return [ras0];
+}
+
+
+## Input/output operations
+
+# REDC,r: read control bus into register.
+# Encoding: 001100rr  ($30-$33)
+:REDC reg is op=0x0c & reg {
+  local port:1 = 0;
+  reg = *[io]:1 port;
+  set_cc(reg);
+}
+
+# REDD,r: read data bus into register.
+# Encoding: 011100rr  ($70-$73)
+:REDD reg is op=0x1c & reg {
+  local port:1 = 1;
+  reg = *[io]:1 port;
+  set_cc(reg);
+}
+
+# REDE,r v: read extended port into register.
+# Encoding: 010101rr vvvvvvvv  ($54-$57)
+:REDE reg, imm8 is op=0x15 & reg; imm8 {
+  local port:1 = imm8:1;
+  reg = *[io]:1 port;
+  set_cc(reg);
+}
+
+# WRTC,r: write register to control bus.
+# Encoding: 110100rr  ($B0-$B3)
+:WRTC reg is op=0x2c & reg {
+  local port:1 = 0;
+  *[io]:1 port = reg;
+}
+
+# WRTD,r: write register to data bus.
+# Encoding: 111100rr  ($F0-$F3)
+:WRTD reg is op=0x3c & reg {
+  local port:1 = 1;
+  *[io]:1 port = reg;
+}
+
+# WRTE,r v: write register to extended port.
+# Encoding: 110101rr vvvvvvvv  ($D4-$D7)
+:WRTE reg, imm8 is op=0x35 & reg; imm8 {
+  local port:1 = imm8:1;
+  *[io]:1 port = reg;
+}
+
+
+## Program status operations
+
+# SPSU: store PSU into r0, then CC reflects r0.
+# Encoding: 00010010  ($12)
+:SPSU is byte=0x12 {
+  r0 = psu;
+  set_cc(r0);
+}
+
+# SPSL: store PSL into r0, then CC reflects r0.
+# Encoding: 00010011  ($13)
+:SPSL is byte=0x13 {
+  r0 = psl;
+  set_cc(r0);
+}
+
+# LPSU: load PSU from r0, but only mutable PSU bits are affected.
+# S (bit7) is preserved, bits4/3 are unassigned and remain 0.
+# Encoding: 10010010  ($92)
+:LPSU is byte=0x92 {
+  local sense:1 = psu & 0x80;
+  local mutable:1 = r0 & 0x67;
+  psu = sense | mutable;
+}
+
+# LPSL: load PSL from r0 (includes CC bits from r0[7:6]).
+# Encoding: 10010011  ($93)
+:LPSL is byte=0x93 {
+  psl = r0;
+}
+
+# TPSU v: test PSU selective bits under mask.
+# Encoding: 10110100 vvvvvvvv  ($B4)
+:TPSU imm8 is byte=0xb4; imm8 {
+  set_cc_test_under_mask(psu, imm8:1);
+}
+
+# TPSL v: test PSL selective bits under mask.
+# Encoding: 10110101 vvvvvvvv  ($B5)
+:TPSL imm8 is byte=0xb5; imm8 {
+  set_cc_test_under_mask(psl, imm8:1);
+}
+
+# CPSU v: clear selected mutable PSU bits.
+# Encoding: 01110100 vvvvvvvv  ($74)
+:CPSU imm8 is byte=0x74; imm8 {
+  local mask:1 = imm8:1 & 0x67;
+  psu = psu & ~mask;
+}
+
+# CPSL v: clear selected PSL bits.
+# Encoding: 01110101 vvvvvvvv  ($75)
+:CPSL imm8 is byte=0x75; imm8 {
+  psl = psl & ~imm8:1;
+}
+
+# PPSU v: set selected mutable PSU bits.
+# Encoding: 01110110 vvvvvvvv  ($76)
+:PPSU imm8 is byte=0x76; imm8 {
+  local bits:1 = imm8:1 & 0x67;
+  psu = psu | bits;
+}
+
+# PPSL v: set selected PSL bits.
+# Encoding: 01110111 vvvvvvvv  ($77)
+:PPSL imm8 is byte=0x77; imm8 {
+  psl = psl | imm8:1;
+}
+
+
+## Compare and test operations
+
+# COMZ reg: compare r0 against reg.
+# Encoding: 111000rr  ($E0-$E3)
+:COMZ reg is op=0x38 & reg {
+  set_cc_compare(r0, reg);
+}
+
+# COMI,r v: compare reg against immediate.
+# Encoding: 111001rr vvvvvvvv  ($E4-$E7)
+:COMI reg, imm8 is op=0x39 & reg; imm8 {
+  set_cc_compare(reg, imm8:1);
+}
+
+# COMR,r rel: compare reg against value at PC-relative address (direct).
+# Encoding: 111010rr 0aaaaaaa  ($E8-$EB, i=0)
+:COMR reg, reladdr is op=0x3a & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local m:1 = *[ram]:1 ea;
+  set_cc_compare(reg, m);
+}
+
+# COMR,r *rel: compare reg against value at PC-relative indirect address.
+# Encoding: 111010rr 1aaaaaaa  ($E8-$EB, i=1)
+:COMR reg, "*"^reladdr is op=0x3a & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  set_cc_compare(reg, m);
+}
+
+# --- COMA (Compare Absolute) ---
+# 3 bytes: 111011rr iccaaaaa aaaaaaaa  ($EC-$EF)
+# idx_ctrl=0: compare reg against memory
+# idx_ctrl=1/2/3: indexed mode, compare r0 against memory and reg is index register
+
+# Non-indexed direct: compare rn with *(abs)
+:COMA reg, absaddr is op=0x3b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local m:1 = *[ram]:1 ea;
+  set_cc_compare(reg, m);
+}
+
+# Non-indexed indirect: compare rn with *(*(abs))
+:COMA reg, "*"^absaddr is op=0x3b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local ptr:2 = *[ram]:2 ea;
+  local m:1 = *[ram]:1 ptr;
+  set_cc_compare(reg, m);
+}
+
+# Indexed-only direct: compare r0 with *(abs + rn)
+:COMA "r0, "^absaddr^", "^reg is op=0x3b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  set_cc_compare(r0, m);
+}
+
+# Indexed-only indirect: compare r0 with *(*(abs) + rn)
+:COMA "r0, *"^absaddr^", "^reg is op=0x3b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  set_cc_compare(r0, m);
+}
+
+# Pre-increment direct: ++rn; compare r0 with *(abs + rn)
+:COMA "r0, "^absaddr^", "^reg^"+" is op=0x3b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  set_cc_compare(r0, m);
+}
+
+# Pre-increment indirect: ++rn; compare r0 with *(*(abs) + rn)
+:COMA "r0, *"^absaddr^", "^reg^"+" is op=0x3b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg + 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  set_cc_compare(r0, m);
+}
+
+# Pre-decrement direct: --rn; compare r0 with *(abs + rn)
+:COMA "r0, "^absaddr^", "^reg^"-" is op=0x3b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (ea + idx);
+  set_cc_compare(r0, m);
+}
+
+# Pre-decrement indirect: --rn; compare r0 with *(*(abs) + rn)
+:COMA "r0, *"^absaddr^", "^reg^"-" is op=0x3b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
+    [ absaddr = (ahigh << 8) | alow; ] {
+  reg = reg - 1;
+  local ea:2 = (ahigh << 8) | alow;
+  local base:2 = *[ram]:2 ea;
+  local idx:2 = zext(reg);
+  local m:1 = *[ram]:1 (base + idx);
+  set_cc_compare(r0, m);
+}
+
+# TMI,r v: test under mask immediate.
+# Encoding: 111101rr vvvvvvvv  ($F4-$F7)
+# CC=EQ if all bits selected by mask are set; otherwise CC=LT.
+:TMI reg, imm8 is op=0x3d & reg; imm8 {
+  set_cc_test_under_mask(reg, imm8:1);
+}

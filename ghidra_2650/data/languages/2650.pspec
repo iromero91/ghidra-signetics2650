@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<processor_spec>
+  <programcounter register="iar"/>
+
+  <register_data>
+    <register name="r0"/>
+    <register name="r1"/>
+    <register name="r2"/>
+    <register name="r3"/>
+    <register name="r1p"/>
+    <register name="r2p"/>
+    <register name="r3p"/>
+    <register name="psu"/>
+    <register name="psl"/>
+    <register name="iar"/>
+    <register name="oar"/>
+    <register name="ir"/>
+    <register name="hr"/>
+    <register name="ras0"  hidden="yes"/>
+    <register name="ras1"  hidden="yes"/>
+    <register name="ras2"  hidden="yes"/>
+    <register name="ras3"  hidden="yes"/>
+    <register name="ras4"  hidden="yes"/>
+    <register name="ras5"  hidden="yes"/>
+    <register name="ras6"  hidden="yes"/>
+    <register name="ras7"  hidden="yes"/>
+  </register_data>
+</processor_spec>
