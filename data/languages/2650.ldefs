@@ -4,7 +4,7 @@
             endian="big"
             size="16"
             variant="default"
-            version="1.2"
+            version="1.3"
             slafile="2650.sla"
             processorspec="2650.pspec"
             id="2650:BE:16:default">

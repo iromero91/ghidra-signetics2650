@@ -197,6 +197,13 @@ define token absaddr_tok (16)
   alow     = (0,7)    # addr[7:0]  (byte2)
 ;
 
+# Absolute branch/call instructions use ippaaaaa aaaaaaaa, where the low 15 bits
+# are the destination annotation and bit 15 is the indirect flag.
+define token absflow_tok (16)
+  flow_ind = (15,15)
+  flow_abs = (0,14)
+;
+
 define token imm8_tok (8)
   imm8 = (0,7)
 ;
@@ -210,23 +217,15 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 
 # Direct branch/call destinations are exported as address operands so Ghidra can
 # recover direct control-flow edges instead of seeing them as computed indirects.
-RELDST: reladdr is ind=0 & rel7 [ reladdr = inst_next + rel7; ] { export *:2 reladdr; }
+RELDST: reladdr is ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
+  export *:2 reladdr;
+}
 RELINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  export *:2 ea;
+  export *[ram]:2 reladdr;
 }
 
-# Page bits are intentionally ignored in the exported semantics for now.
-ABSDST: absaddr is ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
-  export *:2 target;
-}
-ABSINDDST: "*"^absaddr is ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  export *:2 ea;
-}
+BRABSDST: flow_abs is flow_ind=0 & flow_abs { export *:2 flow_abs; }
+BRABSINDDST: "*"^flow_abs is flow_ind=1 & flow_abs { export *:2 flow_abs; }
 
 ZERODST: reladdr is ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   local target:2 = sext(rel7:1) & 0x1fff;
@@ -234,7 +233,7 @@ ZERODST: reladdr is ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 }
 ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   local ea:2 = sext(rel7:1) & 0x1fff;
-  export *:2 ea;
+  export *[ram]:2 ea;
 }
 
 # NOP instruction
@@ -1130,6 +1129,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTR "eq, "^RELDST is byte=0x18; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  iar = &RELDST;
   goto RELDST;
 <done>
 }
@@ -1138,6 +1138,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTR "gt, "^RELDST is byte=0x19; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
+  iar = &RELDST;
   goto RELDST;
 <done>
 }
@@ -1146,12 +1147,14 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTR "lt, "^RELDST is byte=0x1a; RELDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  iar = &RELDST;
   goto RELDST;
 <done>
 }
 
 # BCTR,un rel
 :BCTR "un, "^RELDST is byte=0x1b; RELDST {
+  iar = &RELDST;
   goto RELDST;
 }
 
@@ -1188,61 +1191,61 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Encoding: 000111vv ippaaaaa aaaaaaaa  ($1C-$1F)
 
 # BCTA,eq abs
-:BCTA "eq, "^ABSDST is byte=0x1c; ABSDST {
+:BCTA "eq, "^BRABSDST is byte=0x1c; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCTA,gt abs
-:BCTA "gt, "^ABSDST is byte=0x1d; ABSDST {
+:BCTA "gt, "^BRABSDST is byte=0x1d; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCTA,lt abs
-:BCTA "lt, "^ABSDST is byte=0x1e; ABSDST {
+:BCTA "lt, "^BRABSDST is byte=0x1e; BRABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCTA,un abs
-:BCTA "un, "^ABSDST is byte=0x1f; ABSDST {
-  goto ABSDST;
+:BCTA "un, "^BRABSDST is byte=0x1f; BRABSDST {
+  goto BRABSDST;
 }
 
 # BCTA,eq *abs
-:BCTA "eq, "^ABSINDDST is byte=0x1c; ABSINDDST {
+:BCTA "eq, "^BRABSINDDST is byte=0x1c; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
 # BCTA,gt *abs
-:BCTA "gt, "^ABSINDDST is byte=0x1d; ABSINDDST {
+:BCTA "gt, "^BRABSINDDST is byte=0x1d; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
 # BCTA,lt *abs
-:BCTA "lt, "^ABSINDDST is byte=0x1e; ABSINDDST {
+:BCTA "lt, "^BRABSINDDST is byte=0x1e; BRABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
 # BCTA,un *abs
-:BCTA "un, "^ABSINDDST is byte=0x1f; ABSINDDST {
-  goto [ABSINDDST];
+:BCTA "un, "^BRABSINDDST is byte=0x1f; BRABSINDDST {
+  goto [BRABSINDDST];
 }
 
 # BCFR,v rel: branch on condition FALSE, relative.
@@ -1308,56 +1311,56 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Branch taken when CC does NOT match v. Page bits ignored (see known-limitations).
 
 # BCFA,eq abs  (branch if CC != eq)
-:BCFA "eq, "^ABSDST is byte=0x9c; ABSDST {
+:BCFA "eq, "^BRABSDST is byte=0x9c; BRABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCFA,gt abs  (branch if CC != gt)
-:BCFA "gt, "^ABSDST is byte=0x9d; ABSDST {
+:BCFA "gt, "^BRABSDST is byte=0x9d; BRABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCFA,lt abs  (branch if CC != lt)
-:BCFA "lt, "^ABSDST is byte=0x9e; ABSDST {
+:BCFA "lt, "^BRABSDST is byte=0x9e; BRABSDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BCFA,eq *abs
-:BCFA "eq, "^ABSINDDST is byte=0x9c; ABSINDDST {
+:BCFA "eq, "^BRABSINDDST is byte=0x9c; BRABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
 # BCFA,gt *abs
-:BCFA "gt, "^ABSINDDST is byte=0x9d; ABSINDDST {
+:BCFA "gt, "^BRABSINDDST is byte=0x9d; BRABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
 # BCFA,lt *abs
-:BCFA "lt, "^ABSINDDST is byte=0x9e; ABSINDDST {
+:BCFA "lt, "^BRABSINDDST is byte=0x9e; BRABSINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
@@ -1418,16 +1421,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BRNA,r abs
-:BRNA reg, ABSDST is op=0x17 & reg; ABSDST {
+:BRNA reg, BRABSDST is op=0x17 & reg; BRABSDST {
   if (reg == 0) goto <done>;
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BRNA,r *abs
-:BRNA reg, ABSINDDST is op=0x17 & reg; ABSINDDST {
+:BRNA reg, BRABSINDDST is op=0x17 & reg; BRABSINDDST {
   if (reg == 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
@@ -1455,18 +1458,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BIRA,r abs
-:BIRA reg, ABSDST is op=0x37 & reg; ABSDST {
+:BIRA reg, BRABSDST is op=0x37 & reg; BRABSDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto ABSDST;
+  goto BRABSDST;
 <done>
 }
 
 # BIRA,r *abs
-:BIRA reg, ABSINDDST is op=0x37 & reg; ABSINDDST {
+:BIRA reg, BRABSINDDST is op=0x37 & reg; BRABSINDDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
@@ -1492,16 +1495,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BDRA,r abs
-:BDRA reg, ABSDST is op=0x3f & reg; ABSDST {
+:BDRA reg, BRABSDST is op=0x3f & reg; BRABSDST {
   reg = reg - 1;
-  if (reg != 0) goto ABSDST;
+  if (reg != 0) goto BRABSDST;
 }
 
 # BDRA,r *abs
-:BDRA reg, ABSINDDST is op=0x3f & reg; ABSINDDST {
+:BDRA reg, BRABSINDDST is op=0x3f & reg; BRABSINDDST {
   reg = reg - 1;
   if (reg == 0) goto <done>;
-  goto [ABSINDDST];
+  goto [BRABSINDDST];
 <done>
 }
 
@@ -1576,61 +1579,61 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BSTA,eq abs
-:BSTA "eq, "^ABSDST is byte=0x3c; ABSDST {
+:BSTA "eq, "^BRABSDST is byte=0x3c; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSTA,gt abs
-:BSTA "gt, "^ABSDST is byte=0x3d; ABSDST {
+:BSTA "gt, "^BRABSDST is byte=0x3d; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSTA,lt abs
-:BSTA "lt, "^ABSDST is byte=0x3e; ABSDST {
+:BSTA "lt, "^BRABSDST is byte=0x3e; BRABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSTA,un abs
-:BSTA "un, "^ABSDST is byte=0x3f; ABSDST {
-  call ABSDST;
+:BSTA "un, "^BRABSDST is byte=0x3f; BRABSDST {
+  call BRABSDST;
 }
 
 # BSTA,eq *abs
-:BSTA "eq, "^ABSINDDST is byte=0x3c; ABSINDDST {
+:BSTA "eq, "^BRABSINDDST is byte=0x3c; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
 # BSTA,gt *abs
-:BSTA "gt, "^ABSINDDST is byte=0x3d; ABSINDDST {
+:BSTA "gt, "^BRABSINDDST is byte=0x3d; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
 # BSTA,lt *abs
-:BSTA "lt, "^ABSINDDST is byte=0x3e; ABSINDDST {
+:BSTA "lt, "^BRABSINDDST is byte=0x3e; BRABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
 # BSTA,un *abs
-:BSTA "un, "^ABSINDDST is byte=0x3f; ABSINDDST {
-  call [ABSINDDST];
+:BSTA "un, "^BRABSINDDST is byte=0x3f; BRABSINDDST {
+  call [BRABSINDDST];
 }
 
 # BSFR,v rel: branch to subroutine on condition false, relative.
@@ -1695,56 +1698,56 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BSFA,eq abs  (call if CC != eq)
-:BSFA "eq, "^ABSDST is byte=0xbc; ABSDST {
+:BSFA "eq, "^BRABSDST is byte=0xbc; BRABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSFA,gt abs  (call if CC != gt)
-:BSFA "gt, "^ABSDST is byte=0xbd; ABSDST {
+:BSFA "gt, "^BRABSDST is byte=0xbd; BRABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSFA,lt abs  (call if CC != lt)
-:BSFA "lt, "^ABSDST is byte=0xbe; ABSDST {
+:BSFA "lt, "^BRABSDST is byte=0xbe; BRABSDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSFA,eq *abs
-:BSFA "eq, "^ABSINDDST is byte=0xbc; ABSINDDST {
+:BSFA "eq, "^BRABSINDDST is byte=0xbc; BRABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
 # BSFA,gt *abs
-:BSFA "gt, "^ABSINDDST is byte=0xbd; ABSINDDST {
+:BSFA "gt, "^BRABSINDDST is byte=0xbd; BRABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
 # BSFA,lt *abs
-:BSFA "lt, "^ABSINDDST is byte=0xbe; ABSINDDST {
+:BSFA "lt, "^BRABSINDDST is byte=0xbe; BRABSINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
@@ -1774,16 +1777,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Page bits ignored (see known-limitations).
 
 # BSNA,r abs
-:BSNA reg, ABSDST is op=0x1f & reg; ABSDST {
+:BSNA reg, BRABSDST is op=0x1f & reg; BRABSDST {
   if (reg == 0) goto <done>;
-  call ABSDST;
+  call BRABSDST;
 <done>
 }
 
 # BSNA,r *abs
-:BSNA reg, ABSINDDST is op=0x1f & reg; ABSINDDST {
+:BSNA reg, BRABSINDDST is op=0x1f & reg; BRABSINDDST {
   if (reg == 0) goto <done>;
-  call [ABSINDDST];
+  call [BRABSINDDST];
 <done>
 }
 
