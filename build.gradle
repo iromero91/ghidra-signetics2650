@@ -1,0 +1,24 @@
+import org.gradle.internal.os.OperatingSystem
+
+def ghidraInstallDir = System.env.GHIDRA_INSTALL_DIR
+
+if (!ghidraInstallDir) {
+    throw new GradleException("GHIDRA_INSTALL_DIR is not defined.")
+}
+
+def ghidraSupportDir = new File(ghidraInstallDir, "support")
+def sleighExecutable = OperatingSystem.current().isWindows() ?
+    new File(ghidraSupportDir, "sleigh.bat") :
+    new File(ghidraSupportDir, "sleigh")
+
+tasks.register("compileSleigh", Exec) {
+    group = "build"
+    description = "Compile the Signetics 2650 SLEIGH specification."
+    commandLine sleighExecutable.absolutePath, "data/languages/2650.slaspec"
+}
+
+apply from: new File(ghidraSupportDir, "buildExtension.gradle")
+
+tasks.matching { it.name in ["buildExtension", "zipGhidraExtension"] }.configureEach {
+    dependsOn tasks.named("compileSleigh")
+}

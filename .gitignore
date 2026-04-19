@@ -1,9 +1,10 @@
 # Build and release artifacts
 /build/
 /dist/
+.gradle/
 
 # Generated SLEIGH output
-*.sla
+/data/languages/2650.sla
 
 # Local editor metadata
 /.vscode/
