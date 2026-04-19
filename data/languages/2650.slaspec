@@ -5,6 +5,10 @@ define space ram type=ram_space size=2 default;
 define space register type=register_space size=2;
 define space io type=ram_space size=1;
 
+# Decompiler-facing I/O intrinsics for external bus access.
+define pcodeop io_read;
+define pcodeop io_write;
+
 define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
 define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
 
@@ -18,19 +22,10 @@ define bitrange c   = psl[0,1];
 define bitrange ii  = psu[3,1];
 
 macro set_cc(val) {
-  if (val == 0) goto <cc_z>;
-  if (val s< 0) goto <cc_n>;
-  cc1 = 0;
-  cc0 = 1;
-  goto <cc_done>;
-<cc_z>
-  cc1 = 0;
-  cc0 = 0;
-  goto <cc_done>;
-<cc_n>
-  cc1 = 1;
-  cc0 = 0;
-<cc_done>
+  local is_neg:1 = (val s< 0);
+  local is_nz:1 = (val != 0);
+  cc1 = is_neg;
+  cc0 = is_nz & ~is_neg;
 }
 
 macro add8_set_flags(dst, src) {
@@ -212,6 +207,35 @@ define token reladdr_tok (8)
 ;
 
 attach variables [ reg ] [ r0 r1 r2 r3 ];
+
+# Direct branch/call destinations are exported as address operands so Ghidra can
+# recover direct control-flow edges instead of seeing them as computed indirects.
+RELDST: reladdr is ind=0 & rel7 [ reladdr = inst_next + rel7; ] { export *:2 reladdr; }
+RELINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
+  local ea:2 = inst_next + rel7;
+  export *:2 ea;
+}
+
+# Page bits are intentionally ignored in the exported semantics for now.
+ABSDST: absaddr is ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local target:2 = (ahigh << 8) | alow;
+  export *:2 target;
+}
+ABSINDDST: "*"^absaddr is ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  local ea:2 = (ahigh << 8) | alow;
+  export *:2 ea;
+}
+
+ZERODST: reladdr is ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local target:2 = sext(rel7:1) & 0x1fff;
+  export *:2 target;
+}
+ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
+  local ea:2 = sext(rel7:1) & 0x1fff;
+  export *:2 ea;
+}
 
 # NOP instruction
 :NOP is byte=0xc0 { r0 = r0; }
@@ -1103,154 +1127,122 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 000110vv iaaaaaaa  ($18-$1B)
 
 # BCTR,eq rel
-:BCTR "eq, "^reladdr is byte=0x18; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BCTR "eq, "^RELDST is byte=0x18; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto RELDST;
 <done>
 }
 
 # BCTR,gt rel
-:BCTR "gt, "^reladdr is byte=0x19; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BCTR "gt, "^RELDST is byte=0x19; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto [target];
+  goto RELDST;
 <done>
 }
 
 # BCTR,lt rel
-:BCTR "lt, "^reladdr is byte=0x1a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BCTR "lt, "^RELDST is byte=0x1a; RELDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto RELDST;
 <done>
 }
 
 # BCTR,un rel
-:BCTR "un, "^reladdr is byte=0x1b; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
-  goto [target];
+:BCTR "un, "^RELDST is byte=0x1b; RELDST {
+  goto RELDST;
 }
 
 # BCTR,eq *rel
-:BCTR "eq, *"^reladdr is byte=0x18; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCTR "eq, "^RELINDDST is byte=0x18; RELINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
 # BCTR,gt *rel
-:BCTR "gt, *"^reladdr is byte=0x19; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCTR "gt, "^RELINDDST is byte=0x19; RELINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
 # BCTR,lt *rel
-:BCTR "lt, *"^reladdr is byte=0x1a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCTR "lt, "^RELINDDST is byte=0x1a; RELINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
 # BCTR,un *rel
-:BCTR "un, *"^reladdr is byte=0x1b; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
-  goto [target];
+:BCTR "un, "^RELINDDST is byte=0x1b; RELINDDST {
+  goto [RELINDDST];
 }
 
 # BCTA,v abs: branch on condition true, absolute.
 # Encoding: 000111vv ippaaaaa aaaaaaaa  ($1C-$1F)
 
 # BCTA,eq abs
-:BCTA "eq, "^absaddr is byte=0x1c; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCTA "eq, "^ABSDST is byte=0x1c; ABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCTA,gt abs
-:BCTA "gt, "^absaddr is byte=0x1d; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCTA "gt, "^ABSDST is byte=0x1d; ABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCTA,lt abs
-:BCTA "lt, "^absaddr is byte=0x1e; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCTA "lt, "^ABSDST is byte=0x1e; ABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCTA,un abs
-:BCTA "un, "^absaddr is byte=0x1f; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
-  goto [target];
+:BCTA "un, "^ABSDST is byte=0x1f; ABSDST {
+  goto ABSDST;
 }
 
 # BCTA,eq *abs
-:BCTA "eq, *"^absaddr is byte=0x1c; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCTA "eq, "^ABSINDDST is byte=0x1c; ABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
 # BCTA,gt *abs
-:BCTA "gt, *"^absaddr is byte=0x1d; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCTA "gt, "^ABSINDDST is byte=0x1d; ABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
 # BCTA,lt *abs
-:BCTA "lt, *"^absaddr is byte=0x1e; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCTA "lt, "^ABSINDDST is byte=0x1e; ABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
 # BCTA,un *abs
-:BCTA "un, *"^absaddr is byte=0x1f; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
-  goto [target];
+:BCTA "un, "^ABSINDDST is byte=0x1f; ABSINDDST {
+  goto [ABSINDDST];
 }
 
 # BCFR,v rel: branch on condition FALSE, relative.
@@ -1258,65 +1250,56 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Branch taken when CC does NOT match v.
 
 # BCFR,eq rel  (branch if CC != eq)
-:BCFR "eq, "^reladdr is byte=0x98; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
+:BCFR "eq, "^RELDST is byte=0x98; RELDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [ea];
+  goto RELDST;
 <done>
 }
 
 # BCFR,gt rel  (branch if CC != gt)
-:BCFR "gt, "^reladdr is byte=0x99; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
+:BCFR "gt, "^RELDST is byte=0x99; RELDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto [ea];
+  goto RELDST;
 <done>
 }
 
 # BCFR,lt rel  (branch if CC != lt)
-:BCFR "lt, "^reladdr is byte=0x9a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
+:BCFR "lt, "^RELDST is byte=0x9a; RELDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [ea];
+  goto RELDST;
 <done>
 }
 
 # BCFR,eq *rel
-:BCFR "eq, *"^reladdr is byte=0x98; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCFR "eq, "^RELINDDST is byte=0x98; RELINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
 # BCFR,gt *rel
-:BCFR "gt, *"^reladdr is byte=0x99; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCFR "gt, "^RELINDDST is byte=0x99; RELINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
 # BCFR,lt *rel
-:BCFR "lt, *"^reladdr is byte=0x9a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BCFR "lt, "^RELINDDST is byte=0x9a; RELINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
@@ -1325,71 +1308,56 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Branch taken when CC does NOT match v. Page bits ignored (see known-limitations).
 
 # BCFA,eq abs  (branch if CC != eq)
-:BCFA "eq, "^absaddr is byte=0x9c; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCFA "eq, "^ABSDST is byte=0x9c; ABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCFA,gt abs  (branch if CC != gt)
-:BCFA "gt, "^absaddr is byte=0x9d; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCFA "gt, "^ABSDST is byte=0x9d; ABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCFA,lt abs  (branch if CC != lt)
-:BCFA "lt, "^absaddr is byte=0x9e; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BCFA "lt, "^ABSDST is byte=0x9e; ABSDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BCFA,eq *abs
-:BCFA "eq, *"^absaddr is byte=0x9c; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCFA "eq, "^ABSINDDST is byte=0x9c; ABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
 # BCFA,gt *abs
-:BCFA "gt, *"^absaddr is byte=0x9d; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCFA "gt, "^ABSINDDST is byte=0x9d; ABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
 # BCFA,lt *abs
-:BCFA "lt, *"^absaddr is byte=0x9e; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BCFA "lt, "^ABSINDDST is byte=0x9e; ABSINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
@@ -1419,35 +1387,29 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Target = signed displacement from address 0, masked to 13 bits (page bits cleared).
 
 # ZBRR zero
-:ZBRR reladdr is byte=0x9b; ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
-  local target:2 = sext(rel7:1) & 0x1fff;
-  goto [target];
+:ZBRR ZERODST is byte=0x9b; ZERODST {
+  goto ZERODST;
 }
 
 # ZBRR *zero
-:ZBRR "*"^reladdr is byte=0x9b; ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
-  local ea:2 = sext(rel7:1) & 0x1fff;
-  local target:2 = *[ram]:2 ea;
-  goto [target];
+:ZBRR ZEROINDDST is byte=0x9b; ZEROINDDST {
+  goto [ZEROINDDST];
 }
 
 # BRNR,r rel: branch on register non-zero, relative.
 # Encoding: 010110rr iaaaaaaa  ($58-$5B)
 
 # BRNR,r rel
-:BRNR reg, reladdr is op=0x16 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BRNR reg, RELDST is op=0x16 & reg; RELDST {
   if (reg == 0) goto <done>;
-  goto [target];
+  goto RELDST;
 <done>
 }
 
 # BRNR,r *rel
-:BRNR reg, "*"^reladdr is op=0x16 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BRNR reg, RELINDDST is op=0x16 & reg; RELINDDST {
   if (reg == 0) goto <done>;
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
@@ -1456,21 +1418,16 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BRNA,r abs
-:BRNA reg, absaddr is op=0x17 & reg; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BRNA reg, ABSDST is op=0x17 & reg; ABSDST {
   if (reg == 0) goto <done>;
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BRNA,r *abs
-:BRNA reg, "*"^absaddr is op=0x17 & reg; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BRNA reg, ABSINDDST is op=0x17 & reg; ABSINDDST {
   if (reg == 0) goto <done>;
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
@@ -1478,21 +1435,18 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 110110rr iaaaaaaa  ($D8-$DB)
 
 # BIRR,r rel
-:BIRR reg, reladdr is op=0x36 & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BIRR reg, RELDST is op=0x36 & reg; RELDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto [target];
+  goto RELDST;
 <done>
 }
 
 # BIRR,r *rel
-:BIRR reg, "*"^reladdr is op=0x36 & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BIRR reg, RELINDDST is op=0x36 & reg; RELINDDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto [target];
+  goto [RELINDDST];
 <done>
 }
 
@@ -1501,23 +1455,18 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BIRA,r abs
-:BIRA reg, absaddr is op=0x37 & reg; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BIRA reg, ABSDST is op=0x37 & reg; ABSDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto [target];
+  goto ABSDST;
 <done>
 }
 
 # BIRA,r *abs
-:BIRA reg, "*"^absaddr is op=0x37 & reg; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BIRA reg, ABSINDDST is op=0x37 & reg; ABSINDDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
-  goto [target];
+  goto [ABSINDDST];
 <done>
 }
 
@@ -1525,26 +1474,17 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 111110rr iaaaaaaa  ($F8-$FB)
 
 # BDRR,r rel
-:BDRR reg, reladdr is op=0x3e & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
-  local dest:2 = inst_next;
+:BDRR reg, RELDST is op=0x3e & reg; RELDST {
   reg = reg - 1;
-  if (reg == 0) goto <done>;
-  dest = target;
-<done>
-  goto [dest];
+  if (reg != 0) goto RELDST;
 }
 
 # BDRR,r *rel
-:BDRR reg, "*"^reladdr is op=0x3e & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
-  local dest:2 = inst_next;
+:BDRR reg, RELINDDST is op=0x3e & reg; RELINDDST {
   reg = reg - 1;
   if (reg == 0) goto <done>;
-  dest = target;
+  goto [RELINDDST];
 <done>
-  goto [dest];
 }
 
 # BDRA,r abs: branch on decrementing register, absolute.
@@ -1552,28 +1492,17 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BDRA,r abs
-:BDRA reg, absaddr is op=0x3f & reg; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
-  local dest:2 = inst_next;
+:BDRA reg, ABSDST is op=0x3f & reg; ABSDST {
   reg = reg - 1;
-  if (reg == 0) goto <done>;
-  dest = target;
-<done>
-  goto [dest];
+  if (reg != 0) goto ABSDST;
 }
 
 # BDRA,r *abs
-:BDRA reg, "*"^absaddr is op=0x3f & reg; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
-  local dest:2 = inst_next;
+:BDRA reg, ABSINDDST is op=0x3f & reg; ABSINDDST {
   reg = reg - 1;
   if (reg == 0) goto <done>;
-  dest = target;
+  goto [ABSINDDST];
 <done>
-  goto [dest];
 }
 
 
@@ -1585,73 +1514,61 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 001110vv iaaaaaaa  ($38-$3B)
 
 # BSTR,eq rel
-:BSTR "eq, "^reladdr is byte=0x38; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSTR "eq, "^RELDST is byte=0x38; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSTR,gt rel
-:BSTR "gt, "^reladdr is byte=0x39; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSTR "gt, "^RELDST is byte=0x39; RELDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSTR,lt rel
-:BSTR "lt, "^reladdr is byte=0x3a; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSTR "lt, "^RELDST is byte=0x3a; RELDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSTR,un rel
-:BSTR "un, "^reladdr is byte=0x3b; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
-  call [target];
+:BSTR "un, "^RELDST is byte=0x3b; RELDST {
+  call RELDST;
 }
 
 # BSTR,eq *rel
-:BSTR "eq, *"^reladdr is byte=0x38; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSTR "eq, "^RELINDDST is byte=0x38; RELINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
 # BSTR,gt *rel
-:BSTR "gt, *"^reladdr is byte=0x39; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSTR "gt, "^RELINDDST is byte=0x39; RELINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
 # BSTR,lt *rel
-:BSTR "lt, *"^reladdr is byte=0x3a; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSTR "lt, "^RELINDDST is byte=0x3a; RELINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
 # BSTR,un *rel
-:BSTR "un, *"^reladdr is byte=0x3b; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
-  call [target];
+:BSTR "un, "^RELINDDST is byte=0x3b; RELINDDST {
+  call [RELINDDST];
 }
 
 # BSTA,v abs: branch to subroutine on condition true, absolute.
@@ -1659,146 +1576,117 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BSTA,eq abs
-:BSTA "eq, "^absaddr is byte=0x3c; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSTA "eq, "^ABSDST is byte=0x3c; ABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSTA,gt abs
-:BSTA "gt, "^absaddr is byte=0x3d; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSTA "gt, "^ABSDST is byte=0x3d; ABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSTA,lt abs
-:BSTA "lt, "^absaddr is byte=0x3e; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSTA "lt, "^ABSDST is byte=0x3e; ABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSTA,un abs
-:BSTA "un, "^absaddr is byte=0x3f; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
-  call [target];
+:BSTA "un, "^ABSDST is byte=0x3f; ABSDST {
+  call ABSDST;
 }
 
 # BSTA,eq *abs
-:BSTA "eq, *"^absaddr is byte=0x3c; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSTA "eq, "^ABSINDDST is byte=0x3c; ABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
 # BSTA,gt *abs
-:BSTA "gt, *"^absaddr is byte=0x3d; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSTA "gt, "^ABSINDDST is byte=0x3d; ABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
 # BSTA,lt *abs
-:BSTA "lt, *"^absaddr is byte=0x3e; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSTA "lt, "^ABSINDDST is byte=0x3e; ABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
 # BSTA,un *abs
-:BSTA "un, *"^absaddr is byte=0x3f; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
-  call [target];
+:BSTA "un, "^ABSINDDST is byte=0x3f; ABSINDDST {
+  call [ABSINDDST];
 }
 
 # BSFR,v rel: branch to subroutine on condition false, relative.
 # Encoding: 101110vv iaaaaaaa  ($B8-$BA; $BB is ZBSR)
 
 # BSFR,eq rel  (call if CC != eq)
-:BSFR "eq, "^reladdr is byte=0xb8; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSFR "eq, "^RELDST is byte=0xb8; RELDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSFR,gt rel  (call if CC != gt)
-:BSFR "gt, "^reladdr is byte=0xb9; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSFR "gt, "^RELDST is byte=0xb9; RELDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSFR,lt rel  (call if CC != lt)
-:BSFR "lt, "^reladdr is byte=0xba; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSFR "lt, "^RELDST is byte=0xba; RELDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSFR,eq *rel
-:BSFR "eq, *"^reladdr is byte=0xb8; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSFR "eq, "^RELINDDST is byte=0xb8; RELINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
 # BSFR,gt *rel
-:BSFR "gt, *"^reladdr is byte=0xb9; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSFR "gt, "^RELINDDST is byte=0xb9; RELINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
 # BSFR,lt *rel
-:BSFR "lt, *"^reladdr is byte=0xba; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSFR "lt, "^RELINDDST is byte=0xba; RELINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
@@ -1807,71 +1695,56 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BSFA,eq abs  (call if CC != eq)
-:BSFA "eq, "^absaddr is byte=0xbc; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSFA "eq, "^ABSDST is byte=0xbc; ABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSFA,gt abs  (call if CC != gt)
-:BSFA "gt, "^absaddr is byte=0xbd; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSFA "gt, "^ABSDST is byte=0xbd; ABSDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSFA,lt abs  (call if CC != lt)
-:BSFA "lt, "^absaddr is byte=0xbe; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSFA "lt, "^ABSDST is byte=0xbe; ABSDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSFA,eq *abs
-:BSFA "eq, *"^absaddr is byte=0xbc; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSFA "eq, "^ABSINDDST is byte=0xbc; ABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
 # BSFA,gt *abs
-:BSFA "gt, *"^absaddr is byte=0xbd; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSFA "gt, "^ABSINDDST is byte=0xbd; ABSINDDST {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
 # BSFA,lt *abs
-:BSFA "lt, *"^absaddr is byte=0xbe; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSFA "lt, "^ABSINDDST is byte=0xbe; ABSINDDST {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
@@ -1883,19 +1756,16 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 011110rr iaaaaaaa  ($78-$7B)
 
 # BSNR,r rel
-:BSNR reg, reladdr is op=0x1e & reg; ind=0 & rel7 [ reladdr = inst_next + rel7; ] {
-  local target:2 = inst_next + rel7;
+:BSNR reg, RELDST is op=0x1e & reg; RELDST {
   if (reg == 0) goto <done>;
-  call [target];
+  call RELDST;
 <done>
 }
 
 # BSNR,r *rel
-:BSNR reg, "*"^reladdr is op=0x1e & reg; ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
-  local ea:2 = inst_next + rel7;
-  local target:2 = *[ram]:2 ea;
+:BSNR reg, RELINDDST is op=0x1e & reg; RELINDDST {
   if (reg == 0) goto <done>;
-  call [target];
+  call [RELINDDST];
 <done>
 }
 
@@ -1904,21 +1774,16 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Page bits ignored (see known-limitations).
 
 # BSNA,r abs
-:BSNA reg, absaddr is op=0x1f & reg; ind_abs=0 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local target:2 = (ahigh << 8) | alow;
+:BSNA reg, ABSDST is op=0x1f & reg; ABSDST {
   if (reg == 0) goto <done>;
-  call [target];
+  call ABSDST;
 <done>
 }
 
 # BSNA,r *abs
-:BSNA reg, "*"^absaddr is op=0x1f & reg; ind_abs=1 & idx_ctrl & ahigh & alow
-    [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
-  local target:2 = *[ram]:2 ea;
+:BSNA reg, ABSINDDST is op=0x1f & reg; ABSINDDST {
   if (reg == 0) goto <done>;
-  call [target];
+  call [ABSINDDST];
 <done>
 }
 
@@ -1944,16 +1809,13 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 }
 
 # ZBSR zero
-:ZBSR reladdr is byte=0xbb; ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
-  local target:2 = sext(rel7:1) & 0x1fff;
-  call [target];
+:ZBSR ZERODST is byte=0xbb; ZERODST {
+  call ZERODST;
 }
 
 # ZBSR *zero
-:ZBSR "*"^reladdr is byte=0xbb; ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
-  local ea:2 = sext(rel7:1) & 0x1fff;
-  local target:2 = *[ram]:2 ea;
-  call [target];
+:ZBSR ZEROINDDST is byte=0xbb; ZEROINDDST {
+  call [ZEROINDDST];
 }
 
 # RETC,v: return from subroutine, conditional.
@@ -2025,7 +1887,7 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 001100rr  ($30-$33)
 :REDC reg is op=0x0c & reg {
   local port:1 = 0;
-  reg = *[io]:1 port;
+  reg = io_read(port);
   set_cc(reg);
 }
 
@@ -2033,7 +1895,7 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 011100rr  ($70-$73)
 :REDD reg is op=0x1c & reg {
   local port:1 = 1;
-  reg = *[io]:1 port;
+  reg = io_read(port);
   set_cc(reg);
 }
 
@@ -2041,7 +1903,7 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 010101rr vvvvvvvv  ($54-$57)
 :REDE reg, imm8 is op=0x15 & reg; imm8 {
   local port:1 = imm8:1;
-  reg = *[io]:1 port;
+  reg = io_read(port);
   set_cc(reg);
 }
 
@@ -2049,21 +1911,21 @@ attach variables [ reg ] [ r0 r1 r2 r3 ];
 # Encoding: 110100rr  ($B0-$B3)
 :WRTC reg is op=0x2c & reg {
   local port:1 = 0;
-  *[io]:1 port = reg;
+  io_write(port, reg);
 }
 
 # WRTD,r: write register to data bus.
 # Encoding: 111100rr  ($F0-$F3)
 :WRTD reg is op=0x3c & reg {
   local port:1 = 1;
-  *[io]:1 port = reg;
+  io_write(port, reg);
 }
 
 # WRTE,r v: write register to extended port.
 # Encoding: 110101rr vvvvvvvv  ($D4-$D7)
 :WRTE reg, imm8 is op=0x35 & reg; imm8 {
   local port:1 = imm8:1;
-  *[io]:1 port = reg;
+  io_write(port, reg);
 }
 
 
