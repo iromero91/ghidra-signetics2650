@@ -1,0 +1,157 @@
+* Synthetic 32 KB paging test ROM for Signetics 2650.
+* Baseline 2650 only; no 2650B-only instructions.
+*
+* Each 8 KB page contains:
+* - a small routine at offset 0x0000
+* - direct source/destination bytes at 0x0100 / 0x0200
+* - indirect source/destination bytes at 0x0110 / 0x0210
+* - pointer tables at 0x0300 / 0x0310
+*
+* The routine performs a direct copy, an indirect copy, a relative branch over
+* two NOPs, and an absolute branch into the next page. Page 3 loops back to 0.
+
+        DFLT    16
+
+        ORG     H'0000'
+P0_START loda,r0  P0_DIRECT_SRC
+         stra,r0  P0_DIRECT_DST
+         loda,r1  *P0_INDIRECT_SRC_PTR
+         stra,r1  *P0_INDIRECT_DST_PTR
+         bctr,un  P0_AFTER_DEAD
+         nop
+         nop
+P0_AFTER_DEAD:
+         bcta,un  P1_START
+
+        ORG     H'0100'
+P0_DIRECT_SRC:
+         data     H'10'
+
+        ORG     H'0110'
+P0_INDIRECT_SRC:
+         data     H'20'
+
+        ORG     H'0200'
+P0_DIRECT_DST:
+         data     H'00'
+
+        ORG     H'0210'
+P0_INDIRECT_DST:
+         data     H'00'
+
+        ORG     H'0300'
+P0_INDIRECT_SRC_PTR:
+         acon     P0_INDIRECT_SRC
+
+        ORG     H'0310'
+P0_INDIRECT_DST_PTR:
+         acon     P0_INDIRECT_DST
+
+        ORG     H'2000'
+P1_START loda,r0  P1_DIRECT_SRC
+         stra,r0  P1_DIRECT_DST
+         loda,r1  *P1_INDIRECT_SRC_PTR
+         stra,r1  *P1_INDIRECT_DST_PTR
+         bctr,un  P1_AFTER_DEAD
+         nop
+         nop
+P1_AFTER_DEAD:
+         bcta,un  P2_START
+
+        ORG     H'2100'
+P1_DIRECT_SRC:
+         data     H'11'
+
+        ORG     H'2110'
+P1_INDIRECT_SRC:
+         data     H'21'
+
+        ORG     H'2200'
+P1_DIRECT_DST:
+         data     H'00'
+
+        ORG     H'2210'
+P1_INDIRECT_DST:
+         data     H'00'
+
+        ORG     H'2300'
+P1_INDIRECT_SRC_PTR:
+         acon     P1_INDIRECT_SRC
+
+        ORG     H'2310'
+P1_INDIRECT_DST_PTR:
+         acon     P1_INDIRECT_DST
+
+        ORG     H'4000'
+P2_START loda,r0  P2_DIRECT_SRC
+         stra,r0  P2_DIRECT_DST
+         loda,r1  *P2_INDIRECT_SRC_PTR
+         stra,r1  *P2_INDIRECT_DST_PTR
+         bctr,un  P2_AFTER_DEAD
+         nop
+         nop
+P2_AFTER_DEAD:
+         bcta,un  P3_START
+
+        ORG     H'4100'
+P2_DIRECT_SRC:
+         data     H'12'
+
+        ORG     H'4110'
+P2_INDIRECT_SRC:
+         data     H'22'
+
+        ORG     H'4200'
+P2_DIRECT_DST:
+         data     H'00'
+
+        ORG     H'4210'
+P2_INDIRECT_DST:
+         data     H'00'
+
+        ORG     H'4300'
+P2_INDIRECT_SRC_PTR:
+         acon     P2_INDIRECT_SRC
+
+        ORG     H'4310'
+P2_INDIRECT_DST_PTR:
+         acon     P2_INDIRECT_DST
+
+        ORG     H'6000'
+P3_START loda,r0  P3_DIRECT_SRC
+         stra,r0  P3_DIRECT_DST
+         loda,r1  *P3_INDIRECT_SRC_PTR
+         stra,r1  *P3_INDIRECT_DST_PTR
+         bctr,un  P3_AFTER_DEAD
+         nop
+         nop
+P3_AFTER_DEAD:
+         bcta,un  P0_START
+
+        ORG     H'6100'
+P3_DIRECT_SRC:
+         data     H'13'
+
+        ORG     H'6110'
+P3_INDIRECT_SRC:
+         data     H'23'
+
+        ORG     H'6200'
+P3_DIRECT_DST:
+         data     H'00'
+
+        ORG     H'6210'
+P3_INDIRECT_DST:
+         data     H'00'
+
+        ORG     H'6300'
+P3_INDIRECT_SRC_PTR:
+         acon     P3_INDIRECT_SRC
+
+        ORG     H'6310'
+P3_INDIRECT_DST_PTR:
+         acon     P3_INDIRECT_DST
+
+        ORG     H'7FFF'
+ROM_END:
+         data     H'FF'

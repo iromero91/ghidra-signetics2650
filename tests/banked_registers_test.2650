@@ -1,0 +1,114 @@
+* Banked register semantics test for Signetics 2650 (baseline 2650).
+*
+* Purpose:
+* - Verify that PSL.RS (bit 4) selects between r1/r2/r3 bank 0 and bank 1.
+* - Produce a deterministic PASS/FAIL marker in RAM for emulator checks.
+*
+* PASS criteria (STATUS = 0xA5):
+* 1) r1 in bank0 retains 0x11 after switching to bank1 and modifying bank1 r1.
+* 2) r1 in bank1 is independently 0x22, then 0x23 after increment.
+*
+* FAIL criteria:
+* STATUS = 0xE1..0xE4 indicates which check failed.
+*
+* Suggested emulator inspection addresses:
+* - STATUS         : 0x0100
+* - OBS_B0         : 0x0101
+* - OBS_B1         : 0x0102
+* - OBS_B1_MOD     : 0x0103
+* - OBS_B0_AGAIN   : 0x0104
+* - OBS_PSL        : 0x0105
+
+        DFLT    16
+
+        ORG     H'0000'
+START    lodi,r0  H'00'
+         stra,r0  STATUS
+         stra,r0  OBS_B0
+         stra,r0  OBS_B1
+         stra,r0  OBS_B1_MOD
+         stra,r0  OBS_B0_AGAIN
+         stra,r0  OBS_PSL
+
+* Force bank0, seed r1 bank0.
+         cpsl     H'10'
+         lodi,r1  H'11'
+
+* Switch to bank1, seed r1 bank1.
+         ppsl     H'10'
+         lodi,r1  H'22'
+
+* Back to bank0: must see 0x11.
+         cpsl     H'10'
+         stra,r1  OBS_B0
+         comi,r1  H'11'
+         bctr,eq  CHECK_BANK1
+         bctr,un  FAIL_E1
+
+CHECK_BANK1:
+* In bank1: must see 0x22.
+         ppsl     H'10'
+         stra,r1  OBS_B1
+         comi,r1  H'22'
+         bctr,eq  MODIFY_BANK1
+         bctr,un  FAIL_E2
+
+MODIFY_BANK1:
+* Modify bank1 r1 to 0x23.
+         addi,r1  H'01'
+         stra,r1  OBS_B1_MOD
+
+* Return to bank0: must still be 0x11.
+         cpsl     H'10'
+         stra,r1  OBS_B0_AGAIN
+         comi,r1  H'11'
+         bctr,eq  CHECK_BANK1_MOD
+         bctr,un  FAIL_E3
+
+CHECK_BANK1_MOD:
+* Return to bank1: must be 0x23.
+         ppsl     H'10'
+         comi,r1  H'23'
+         bctr,eq  PASS
+         bctr,un  FAIL_E4
+
+PASS:
+         lodi,r0  H'A5'
+         stra,r0  STATUS
+         spsl
+         stra,r0  OBS_PSL
+PASS_LOOP:
+         bctr,un  PASS_LOOP
+
+FAIL_E1:
+         lodi,r0  H'E1'
+         bctr,un  FAIL_COMMON
+FAIL_E2:
+         lodi,r0  H'E2'
+         bctr,un  FAIL_COMMON
+FAIL_E3:
+         lodi,r0  H'E3'
+         bctr,un  FAIL_COMMON
+FAIL_E4:
+         lodi,r0  H'E4'
+
+FAIL_COMMON:
+         stra,r0  STATUS
+         spsl
+         stra,r0  OBS_PSL
+FAIL_LOOP:
+         bctr,un  FAIL_LOOP
+
+        ORG     H'0100'
+STATUS:
+         data     H'00'
+OBS_B0:
+         data     H'00'
+OBS_B1:
+         data     H'00'
+OBS_B1_MOD:
+         data     H'00'
+OBS_B0_AGAIN:
+         data     H'00'
+OBS_PSL:
+         data     H'00'
