@@ -26,6 +26,8 @@ This file will collect insights, references, and findings during the process of 
   disassembly shows page-qualified labels for direct and indirect absolute
   accesses in every page.
 - With volatile memory enabled, decompilation shows concrete page-local accesses such as `DAT_ram_2100`, `DAT_ram_4300`, and dereferenced pointer copies across all four pages.
-- Remaining semantic gap: hardware-accurate transient latch override/restore for
-  non-branch indirect accesses is still not modeled. Current behavior is the
-  intentional practical 15-bit dereference model.
+- Deferred non-goal: hardware-accurate transient latch override/restore for
+  non-branch indirect accesses is intentionally not modeled. Ghidra is aimed at
+  static analysis rather than fine-grained bus-timing reconstruction, and the
+  current practical 15-bit dereference model gives good disassembly,
+  decompilation, and CFG recovery.
