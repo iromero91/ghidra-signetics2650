@@ -6,8 +6,12 @@ define space register type=register_space size=2;
 define space io type=ram_space size=1;
 
 # Decompiler-facing I/O intrinsics for external bus access.
-define pcodeop io_read;
-define pcodeop io_write;
+define pcodeop io_read_control;
+define pcodeop io_read_data;
+define pcodeop io_read_extended;
+define pcodeop io_write_control;
+define pcodeop io_write_data;
+define pcodeop io_write_extended;
 
 define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
 define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
@@ -162,44 +166,19 @@ macro ior8_set_cc(dst, src) {
 }
 
 macro set_cc_compare(lhs, rhs) {
-  if (lhs == rhs) goto <cmp_eq>;
-
   # COM=1 -> logical (unsigned) compare, COM=0 -> arithmetic (signed) compare.
-  if (com != 0) goto <cmp_logical>;
-  if (lhs s< rhs) goto <cmp_lt>;
-  goto <cmp_gt>;
-
-<cmp_logical>
-  if (lhs < rhs) goto <cmp_lt>;
-  goto <cmp_gt>;
-
-<cmp_eq>
-  cc1 = 0;
-  cc0 = 0;
-  goto <cmp_done>;
-
-<cmp_lt>
-  cc1 = 1;
-  cc0 = 0;
-  goto <cmp_done>;
-
-<cmp_gt>
-  cc1 = 0;
-  cc0 = 1;
-
-<cmp_done>
+  local eq:1 = (lhs == rhs);
+  local lt_signed:1 = (lhs s< rhs);
+  local lt_logical:1 = (lhs < rhs);
+  local lt:1 = (lt_signed & ~com) | (lt_logical & com);
+  cc1 = (~eq) & lt;
+  cc0 = (~eq) & ~lt;
 }
 
 macro set_cc_test_under_mask(val, mask) {
   local t:1 = val & mask;
-  if (t == mask) goto <tmi_eq>;
-  cc1 = 1;
+  cc1 = (t != mask);
   cc0 = 0;
-  goto <tmi_done>;
-<tmi_eq>
-  cc1 = 0;
-  cc0 = 0;
-<tmi_done>
 }
 
 
@@ -1155,8 +1134,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTR,eq rel
 :BCTR "eq, "^RELDST is byte=0x18; RELDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if ((cc1 | cc0) != 0) goto <done>;
   iar = &RELDST;
   goto RELDST;
 <done>
@@ -1992,46 +1970,40 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # REDC,r: read control bus into register.
 # Encoding: 001100rr  ($30-$33)
 :REDC reg is op=0x0c & reg {
-  local port:1 = 0;
-  reg = io_read(port);
+  reg = io_read_control();
   set_cc(reg);
 }
 
 # REDD,r: read data bus into register.
 # Encoding: 011100rr  ($70-$73)
 :REDD reg is op=0x1c & reg {
-  local port:1 = 1;
-  reg = io_read(port);
+  reg = io_read_data();
   set_cc(reg);
 }
 
 # REDE,r v: read extended port into register.
 # Encoding: 010101rr vvvvvvvv  ($54-$57)
 :REDE reg, imm8 is op=0x15 & reg; imm8 {
-  local port:1 = imm8:1;
-  reg = io_read(port);
+  reg = io_read_extended(imm8:1);
   set_cc(reg);
 }
 
 # WRTC,r: write register to control bus.
 # Encoding: 110100rr  ($B0-$B3)
 :WRTC reg is op=0x2c & reg {
-  local port:1 = 0;
-  io_write(port, reg);
+  io_write_control(reg);
 }
 
 # WRTD,r: write register to data bus.
 # Encoding: 111100rr  ($F0-$F3)
 :WRTD reg is op=0x3c & reg {
-  local port:1 = 1;
-  io_write(port, reg);
+  io_write_data(reg);
 }
 
 # WRTE,r v: write register to extended port.
 # Encoding: 110101rr vvvvvvvv  ($D4-$D7)
 :WRTE reg, imm8 is op=0x35 & reg; imm8 {
-  local port:1 = imm8:1;
-  io_write(port, reg);
+  io_write_extended(imm8:1, reg);
 }
 
 
