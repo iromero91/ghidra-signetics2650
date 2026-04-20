@@ -47,7 +47,7 @@ Current test ROMs:
 - `tests/banked_registers_test.2650` -> PSL.RS banked register semantics.
 	- Run in emulator and inspect RAM `0x0100` (`STATUS`):
 		- `0xA5` = pass
-		- `0xE1`..`0xE4` = banked-register semantic failure
+		- `0xE1`..`0xE5` = banked-register semantic failure
 
 ## Reference material
 

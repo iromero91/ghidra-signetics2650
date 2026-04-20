@@ -7,9 +7,10 @@
 * PASS criteria (STATUS = 0xA5):
 * 1) r1 in bank0 retains 0x11 after switching to bank1 and modifying bank1 r1.
 * 2) r1 in bank1 is independently 0x22, then 0x23 after increment.
+* 3) LPSL-driven RS switching also selects the correct banked register set.
 *
 * FAIL criteria:
-* STATUS = 0xE1..0xE4 indicates which check failed.
+* STATUS = 0xE1..0xE5 indicates which check failed.
 *
 * Suggested emulator inspection addresses:
 * - STATUS         : 0x0100
@@ -18,6 +19,8 @@
 * - OBS_B1_MOD     : 0x0103
 * - OBS_B0_AGAIN   : 0x0104
 * - OBS_PSL        : 0x0105
+* - OBS_LPSL_B0    : 0x0106
+* - OBS_LPSL_B1    : 0x0107
 
         DFLT    16
 
@@ -29,6 +32,8 @@ START    lodi,r0  H'00'
          stra,r0  OBS_B1_MOD
          stra,r0  OBS_B0_AGAIN
          stra,r0  OBS_PSL
+         stra,r0  OBS_LPSL_B0
+         stra,r0  OBS_LPSL_B1
 
 * Force bank0, seed r1 bank0.
          cpsl     H'10'
@@ -43,7 +48,7 @@ START    lodi,r0  H'00'
          stra,r1  OBS_B0
          comi,r1  H'11'
          bctr,eq  CHECK_BANK1
-         bctr,un  FAIL_E1
+         bcta,un  FAIL_E1
 
 CHECK_BANK1:
 * In bank1: must see 0x22.
@@ -69,8 +74,26 @@ CHECK_BANK1_MOD:
 * Return to bank1: must be 0x23.
          ppsl     H'10'
          comi,r1  H'23'
-         bctr,eq  PASS
+         bctr,eq  CHECK_LPSL_BANKING
          bctr,un  FAIL_E4
+
+CHECK_LPSL_BANKING:
+* Use LPSL to select bank0 and verify r1=0x11.
+         lodi,r0  H'00'
+         lpsl
+         stra,r1  OBS_LPSL_B0
+         comi,r1  H'11'
+         bctr,eq  CHECK_LPSL_BANK1
+         bctr,un  FAIL_E5
+
+CHECK_LPSL_BANK1:
+* Use LPSL to select bank1 and verify r1=0x23.
+         lodi,r0  H'10'
+         lpsl
+         stra,r1  OBS_LPSL_B1
+         comi,r1  H'23'
+         bctr,eq  PASS
+         bctr,un  FAIL_E5
 
 PASS:
          lodi,r0  H'A5'
@@ -91,6 +114,9 @@ FAIL_E3:
          bctr,un  FAIL_COMMON
 FAIL_E4:
          lodi,r0  H'E4'
+         bctr,un  FAIL_COMMON
+FAIL_E5:
+         lodi,r0  H'E5'
 
 FAIL_COMMON:
          stra,r0  STATUS
@@ -111,4 +137,8 @@ OBS_B1_MOD:
 OBS_B0_AGAIN:
          data     H'00'
 OBS_PSL:
+         data     H'00'
+OBS_LPSL_B0:
+         data     H'00'
+OBS_LPSL_B1:
          data     H'00'
