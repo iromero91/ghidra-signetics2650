@@ -8,4 +8,24 @@ This file will collect insights, references, and findings during the process of 
 - Archive.org: https://archive.org/search.php?query=signetics%202650
 
 ## Insights
-- [Add insights here as you progress]
+- Absolute branch/call families now decode the full 15-bit destination from the
+  encoded page bits plus low-13 address and update `page_latch` when the branch
+  is taken.
+- Direct absolute data accesses are modeled as page-local to the executing
+  instruction (`inst_start` page bits + encoded low 13 bits). This gives
+  concrete disassembly labels and decompiler constants for non-indirect forms.
+- Absolute indirect data accesses fetch the pointer from the current page, then
+  dereference the full 15-bit pointer value. This is the current practical
+  analysis model for indirect paging semantics.
+- A synthetic 32 KB paging test ROM now exists at `tests/paging_test.bin`.
+- The synthetic ROM places one routine at the top of each 8 KB page and exercises direct absolute load/store within page.
+- The synthetic ROM also exercises indirect absolute load/store through page-local pointer tables.
+- The synthetic ROM also exercises relative branch within page.
+- The synthetic ROM also exercises absolute branch to the next page, with the last page looping back to page 0.
+- Validation results from the synthetic ROM:
+  disassembly shows page-qualified labels for direct and indirect absolute
+  accesses in every page.
+- With volatile memory enabled, decompilation shows concrete page-local accesses such as `DAT_ram_2100`, `DAT_ram_4300`, and dereferenced pointer copies across all four pages.
+- Remaining semantic gap: hardware-accurate transient latch override/restore for
+  non-branch indirect accesses is still not modeled. Current behavior is the
+  intentional practical 15-bit dereference model.
