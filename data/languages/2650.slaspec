@@ -11,6 +11,7 @@ define pcodeop io_write;
 
 define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
 define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
+define register offset=0x30 size=1 [ page_latch ];
 
 define bitrange cc1 = psl[7,1];
 define bitrange cc0 = psl[6,1];
@@ -20,6 +21,13 @@ define bitrange ovf = psl[2,1];
 define bitrange com = psl[1,1];
 define bitrange c   = psl[0,1];
 define bitrange ii  = psu[3,1];
+
+# Page-latch context: holds the current page bits (ADR14:ADR13).
+# Set by branch/call instructions; defaults to page 0 at RESET.
+# Non-branch memory accesses use this to form full 15-bit effective addresses.
+define context
+  page_latch
+;
 
 macro set_cc(val) {
   local is_neg:1 = (val s< 0);
@@ -197,11 +205,14 @@ define token absaddr_tok (16)
   alow     = (0,7)    # addr[7:0]  (byte2)
 ;
 
-# Absolute branch/call instructions use ippaaaaa aaaaaaaa, where the low 15 bits
-# are the destination annotation and bit 15 is the indirect flag.
+# Absolute branch/call instructions use ippaaaaa aaaaaaaa format, where:
+# - i (bit 15) is the indirect flag
+# - pp (bits 14-13) are the page bits that set ADR14:ADR13
+# - aaa (bits 12-0) are the 13-bit address within the target page
 define token absflow_tok (16)
-  flow_ind = (15,15)
-  flow_abs = (0,14)
+  flow_ind  = (15,15)   # indirect flag
+  flow_page = (13,14)   # page bits [14:13] for ADR14:ADR13
+  flow_addr = (0,12)    # address within page [12:0]
 ;
 
 define token imm8_tok (8)
@@ -224,8 +235,26 @@ RELINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = inst_next + rel7; ] {
   export *[ram]:2 reladdr;
 }
 
-BRABSDST: flow_abs is flow_ind=0 & flow_abs { export *:2 flow_abs; }
-BRABSINDDST: "*"^flow_abs is flow_ind=1 & flow_abs { export *:2 flow_abs; }
+BRABSDST: absflow is flow_ind=0 & flow_page & flow_addr 
+    [ absflow = (flow_page << 13) | flow_addr; ] {
+  export *:2 absflow;
+}
+BRABSINDDST: "*"^absflow is flow_ind=1 & flow_page & flow_addr 
+    [ absflow = (flow_page << 13) | flow_addr; ] {
+  export *[ram]:2 absflow;
+}
+
+# Absolute data operands are 13-bit in the encoding. For display/references,
+# qualify them with the current instruction page so non-page0 listings are
+# rendered with page-local labels.
+ABSDATADST: absaddr is ind_abs=0 & idx_ctrl & ahigh & alow
+    [ absaddr = ((inst_start >> 13) << 13) | (ahigh << 8) | alow; ] {
+  export *:2 absaddr;
+}
+ABSDATAINDDST: "*"^absaddr is ind_abs=1 & idx_ctrl & ahigh & alow
+    [ absaddr = ((inst_start >> 13) << 13) | (ahigh << 8) | alow; ] {
+  export *[ram]:2 absaddr;
+}
 
 ZERODST: reladdr is ind=0 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   local target:2 = sext(rel7:1) & 0x1fff;
@@ -288,35 +317,31 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # idx_ctrl=1/2/3: indexed, destination forced to r0, reg is the index register
 
 # Non-indexed direct: rn = *(abs)
-:LODA reg, absaddr is op=0x03 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:LODA reg, ABSDATADST is op=0x03 & reg; idx_ctrl=0 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   reg = *[ram]:1 ea;
   set_cc(reg);
 }
 
 # Non-indexed indirect: rn = *(*(abs))
-:LODA reg, "*"^absaddr is op=0x03 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:LODA reg, ABSDATAINDDST is op=0x03 & reg; idx_ctrl=0 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local indir:2 = *[ram]:2 ea;
   reg = *[ram]:1 indir;
   set_cc(reg);
 }
 
 # Indexed-only direct: r0 = *(abs + rn)
-:LODA "r0, "^absaddr^", "^reg is op=0x03 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:LODA "r0, "^ABSDATADST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Indexed-only indirect: r0 = *(*(abs) + rn)
-:LODA "r0, *"^absaddr^", "^reg is op=0x03 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:LODA "r0, *"^ABSDATAINDDST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -324,20 +349,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 }
 
 # Pre-increment direct: ++rn; r0 = *(abs + rn)
-:LODA "r0, "^absaddr^", "^reg^"+" is op=0x03 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:LODA "r0, "^ABSDATADST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATADST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Pre-increment indirect: ++rn; r0 = *(*(abs) + rn)
-:LODA "r0, *"^absaddr^", "^reg^"+" is op=0x03 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:LODA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATAINDDST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -345,20 +368,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 }
 
 # Pre-decrement direct: --rn; r0 = *(abs + rn)
-:LODA "r0, "^absaddr^", "^reg^"-" is op=0x03 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:LODA "r0, "^ABSDATADST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATADST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Pre-decrement indirect: --rn; r0 = *(*(abs) + rn)
-:LODA "r0, *"^absaddr^", "^reg^"-" is op=0x03 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:LODA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATAINDDST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -394,70 +415,62 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # idx_ctrl=1/2/3: indexed mode, source forced to r0 and reg is index register
 
 # Non-indexed direct: *(abs) = rn
-:STRA reg, absaddr is op=0x33 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:STRA reg, ABSDATADST is op=0x33 & reg; idx_ctrl=0 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   *[ram]:1 ea = reg;
 }
 
 # Non-indexed indirect: *(*(abs)) = rn
-:STRA reg, "*"^absaddr is op=0x33 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:STRA reg, ABSDATAINDDST is op=0x33 & reg; idx_ctrl=0 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local ptr:2 = *[ram]:2 ea;
   *[ram]:1 ptr = reg;
 }
 
 # Indexed-only direct: *(abs + rn) = r0
-:STRA "r0, "^absaddr^", "^reg is op=0x33 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:STRA "r0, "^ABSDATADST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Indexed-only indirect: *(*(abs) + rn) = r0
-:STRA "r0, *"^absaddr^", "^reg is op=0x33 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+:STRA "r0, *"^ABSDATAINDDST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
 }
 
 # Pre-increment direct: ++rn; *(abs + rn) = r0
-:STRA "r0, "^absaddr^", "^reg^"+" is op=0x33 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:STRA "r0, "^ABSDATADST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATADST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Pre-increment indirect: ++rn; *(*(abs) + rn) = r0
-:STRA "r0, *"^absaddr^", "^reg^"+" is op=0x33 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:STRA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATAINDDST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
 }
 
 # Pre-decrement direct: --rn; *(abs + rn) = r0
-:STRA "r0, "^absaddr^", "^reg^"-" is op=0x33 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:STRA "r0, "^ABSDATADST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATADST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Pre-decrement indirect: --rn; *(*(abs) + rn) = r0
-:STRA "r0, *"^absaddr^", "^reg^"-" is op=0x33 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
-    [ absaddr = (ahigh << 8) | alow; ] {
+:STRA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATAINDDST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | ((ahigh << 8) | alow);
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
@@ -502,7 +515,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: rn += *(abs)
 :ADDA reg, absaddr is op=0x23 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   add8_set_flags(reg, m);
 }
@@ -510,7 +523,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: rn += *(*(abs))
 :ADDA reg, "*"^absaddr is op=0x23 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   add8_set_flags(reg, m);
@@ -519,7 +532,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: r0 += *(abs + rn)
 :ADDA "r0, "^absaddr^", "^reg is op=0x23 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   add8_set_flags(r0, m);
@@ -528,7 +541,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: r0 += *(*(abs) + rn)
 :ADDA "r0, *"^absaddr^", "^reg is op=0x23 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -539,7 +552,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ADDA "r0, "^absaddr^", "^reg^"+" is op=0x23 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   add8_set_flags(r0, m);
@@ -549,7 +562,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ADDA "r0, *"^absaddr^", "^reg^"+" is op=0x23 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -560,7 +573,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ADDA "r0, "^absaddr^", "^reg^"-" is op=0x23 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   add8_set_flags(r0, m);
@@ -570,7 +583,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ADDA "r0, *"^absaddr^", "^reg^"-" is op=0x23 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -614,7 +627,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: rn -= *(abs)
 :SUBA reg, absaddr is op=0x2b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   sub8_set_flags(reg, m);
 }
@@ -622,7 +635,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: rn -= *(*(abs))
 :SUBA reg, "*"^absaddr is op=0x2b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   sub8_set_flags(reg, m);
@@ -631,7 +644,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: r0 -= *(abs + rn)
 :SUBA "r0, "^absaddr^", "^reg is op=0x2b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   sub8_set_flags(r0, m);
@@ -640,7 +653,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: r0 -= *(*(abs) + rn)
 :SUBA "r0, *"^absaddr^", "^reg is op=0x2b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -651,7 +664,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :SUBA "r0, "^absaddr^", "^reg^"+" is op=0x2b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   sub8_set_flags(r0, m);
@@ -661,7 +674,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :SUBA "r0, *"^absaddr^", "^reg^"+" is op=0x2b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -672,7 +685,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :SUBA "r0, "^absaddr^", "^reg^"-" is op=0x2b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   sub8_set_flags(r0, m);
@@ -682,7 +695,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :SUBA "r0, *"^absaddr^", "^reg^"-" is op=0x2b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -729,7 +742,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: rn ^= *(abs)
 :EORA reg, absaddr is op=0x0b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   eor8_set_cc(reg, m);
 }
@@ -737,7 +750,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: rn ^= *(*(abs))
 :EORA reg, "*"^absaddr is op=0x0b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   eor8_set_cc(reg, m);
@@ -746,7 +759,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: r0 ^= *(abs + rn)
 :EORA "r0, "^absaddr^", "^reg is op=0x0b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   eor8_set_cc(r0, m);
@@ -755,7 +768,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: r0 ^= *(*(abs) + rn)
 :EORA "r0, *"^absaddr^", "^reg is op=0x0b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -766,7 +779,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :EORA "r0, "^absaddr^", "^reg^"+" is op=0x0b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   eor8_set_cc(r0, m);
@@ -776,7 +789,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :EORA "r0, *"^absaddr^", "^reg^"+" is op=0x0b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -787,7 +800,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :EORA "r0, "^absaddr^", "^reg^"-" is op=0x0b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   eor8_set_cc(r0, m);
@@ -797,7 +810,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :EORA "r0, *"^absaddr^", "^reg^"-" is op=0x0b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -841,7 +854,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: rn &= *(abs)
 :ANDA reg, absaddr is op=0x13 & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   and8_set_cc(reg, m);
 }
@@ -849,7 +862,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: rn &= *(*(abs))
 :ANDA reg, "*"^absaddr is op=0x13 & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   and8_set_cc(reg, m);
@@ -858,7 +871,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: r0 &= *(abs + rn)
 :ANDA "r0, "^absaddr^", "^reg is op=0x13 & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   and8_set_cc(r0, m);
@@ -867,7 +880,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: r0 &= *(*(abs) + rn)
 :ANDA "r0, *"^absaddr^", "^reg is op=0x13 & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -878,7 +891,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ANDA "r0, "^absaddr^", "^reg^"+" is op=0x13 & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   and8_set_cc(r0, m);
@@ -888,7 +901,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ANDA "r0, *"^absaddr^", "^reg^"+" is op=0x13 & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -899,7 +912,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ANDA "r0, "^absaddr^", "^reg^"-" is op=0x13 & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   and8_set_cc(r0, m);
@@ -909,7 +922,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :ANDA "r0, *"^absaddr^", "^reg^"-" is op=0x13 & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -953,7 +966,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: rn |= *(abs)
 :IORA reg, absaddr is op=0x1b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   ior8_set_cc(reg, m);
 }
@@ -961,7 +974,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: rn |= *(*(abs))
 :IORA reg, "*"^absaddr is op=0x1b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   ior8_set_cc(reg, m);
@@ -970,7 +983,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: r0 |= *(abs + rn)
 :IORA "r0, "^absaddr^", "^reg is op=0x1b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   ior8_set_cc(r0, m);
@@ -979,7 +992,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: r0 |= *(*(abs) + rn)
 :IORA "r0, *"^absaddr^", "^reg is op=0x1b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -990,7 +1003,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :IORA "r0, "^absaddr^", "^reg^"+" is op=0x1b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   ior8_set_cc(r0, m);
@@ -1000,7 +1013,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :IORA "r0, *"^absaddr^", "^reg^"+" is op=0x1b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -1011,7 +1024,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :IORA "r0, "^absaddr^", "^reg^"-" is op=0x1b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   ior8_set_cc(r0, m);
@@ -1021,7 +1034,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :IORA "r0, *"^absaddr^", "^reg^"-" is op=0x1b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -1194,6 +1207,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "eq, "^BRABSDST is byte=0x1c; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1202,6 +1217,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "gt, "^BRABSDST is byte=0x1d; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1210,12 +1227,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "lt, "^BRABSDST is byte=0x1e; BRABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
 
 # BCTA,un abs
 :BCTA "un, "^BRABSDST is byte=0x1f; BRABSDST {
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 }
 
@@ -1223,6 +1244,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "eq, "^BRABSINDDST is byte=0x1c; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1231,6 +1254,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "gt, "^BRABSINDDST is byte=0x1d; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1239,12 +1264,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BCTA "lt, "^BRABSINDDST is byte=0x1e; BRABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
 
 # BCTA,un *abs
 :BCTA "un, "^BRABSINDDST is byte=0x1f; BRABSINDDST {
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 }
 
@@ -1315,6 +1344,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1324,6 +1355,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1333,6 +1366,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1342,6 +1377,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1351,6 +1388,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1360,6 +1399,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1371,6 +1412,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # BXA abs,r3
 :BXA absaddr",r3" is byte=0x9f; ind_abs=0 & idx_ctrl & ahigh & alow
     [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  page_latch = idx_ctrl:1;
   local base:2 = (ahigh << 8) | alow;
   local target:2 = base + zext(r3);
   goto [target];
@@ -1379,7 +1421,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # BXA *abs,r3
 :BXA "*"^absaddr",r3" is byte=0x9f; ind_abs=1 & idx_ctrl & ahigh & alow
     [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  page_latch = idx_ctrl:1;
+  local ea:2 = (idx_ctrl << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local target:2 = base + zext(r3);
   goto [target];
@@ -1461,6 +1504,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BIRA reg, BRABSDST is op=0x37 & reg; BRABSDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   goto BRABSDST;
 <done>
 }
@@ -1469,6 +1514,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BIRA reg, BRABSINDDST is op=0x37 & reg; BRABSINDDST {
   reg = reg + 1;
   if (reg == 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1497,13 +1544,21 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # BDRA,r abs
 :BDRA reg, BRABSDST is op=0x3f & reg; BRABSDST {
   reg = reg - 1;
-  if (reg != 0) goto BRABSDST;
+  if (reg != 0) goto <branch>;
+  goto <done>;
+<branch>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
+  goto BRABSDST;
+<done>
 }
 
 # BDRA,r *abs
 :BDRA reg, BRABSINDDST is op=0x3f & reg; BRABSINDDST {
   reg = reg - 1;
   if (reg == 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   goto [BRABSINDDST];
 <done>
 }
@@ -1582,6 +1637,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "eq, "^BRABSDST is byte=0x3c; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
@@ -1590,6 +1647,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "gt, "^BRABSDST is byte=0x3d; BRABSDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
@@ -1598,12 +1657,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "lt, "^BRABSDST is byte=0x3e; BRABSDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
 
 # BSTA,un abs
 :BSTA "un, "^BRABSDST is byte=0x3f; BRABSDST {
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 }
 
@@ -1611,6 +1674,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "eq, "^BRABSINDDST is byte=0x3c; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
@@ -1619,6 +1684,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "gt, "^BRABSINDDST is byte=0x3d; BRABSINDDST {
   if (cc1 != 0) goto <done>;
   if (cc0 == 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
@@ -1627,12 +1694,16 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :BSTA "lt, "^BRABSINDDST is byte=0x3e; BRABSINDDST {
   if (cc1 == 0) goto <done>;
   if (cc0 != 0) goto <done>;
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
 
 # BSTA,un *abs
 :BSTA "un, "^BRABSINDDST is byte=0x3f; BRABSINDDST {
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 }
 
@@ -1702,6 +1773,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
@@ -1711,6 +1784,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
@@ -1720,6 +1795,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSDST >> 13;
+  page_latch = pgbits:1;
   call BRABSDST;
 <done>
 }
@@ -1729,6 +1806,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
@@ -1738,6 +1817,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 != 0) goto <take>;
   if (cc0 != 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
@@ -1747,6 +1828,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
   if (cc1 == 0) goto <take>;
   if (cc0 == 0) goto <done>;
 <take>
+  local pgbits:2 = BRABSINDDST >> 13;
+  page_latch = pgbits:1;
   call [BRABSINDDST];
 <done>
 }
@@ -1797,6 +1880,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # BSXA abs,r3
 :BSXA absaddr",r3" is byte=0xbf; ind_abs=0 & idx_ctrl & ahigh & alow
     [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
+  page_latch = idx_ctrl:1;
   local base:2 = (ahigh << 8) | alow;
   local target:2 = base + zext(r3);
   call [target];
@@ -1805,7 +1889,8 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # BSXA *abs,r3
 :BSXA "*"^absaddr",r3" is byte=0xbf; ind_abs=1 & idx_ctrl & ahigh & alow
     [ absaddr = (idx_ctrl << 13) | (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  page_latch = idx_ctrl:1;
+  local ea:2 = (idx_ctrl << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local target:2 = base + zext(r3);
   call [target];
@@ -2041,7 +2126,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed direct: compare rn with *(abs)
 :COMA reg, absaddr is op=0x3b & reg; ind_abs=0 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local m:1 = *[ram]:1 ea;
   set_cc_compare(reg, m);
 }
@@ -2049,7 +2134,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Non-indexed indirect: compare rn with *(*(abs))
 :COMA reg, "*"^absaddr is op=0x3b & reg; ind_abs=1 & idx_ctrl=0 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   local m:1 = *[ram]:1 ptr;
   set_cc_compare(reg, m);
@@ -2058,7 +2143,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only direct: compare r0 with *(abs + rn)
 :COMA "r0, "^absaddr^", "^reg is op=0x3b & reg; ind_abs=0 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   set_cc_compare(r0, m);
@@ -2067,7 +2152,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Indexed-only indirect: compare r0 with *(*(abs) + rn)
 :COMA "r0, *"^absaddr^", "^reg is op=0x3b & reg; ind_abs=1 & idx_ctrl=3 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -2078,7 +2163,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :COMA "r0, "^absaddr^", "^reg^"+" is op=0x3b & reg; ind_abs=0 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   set_cc_compare(r0, m);
@@ -2088,7 +2173,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :COMA "r0, *"^absaddr^", "^reg^"+" is op=0x3b & reg; ind_abs=1 & idx_ctrl=1 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg + 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
@@ -2099,7 +2184,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :COMA "r0, "^absaddr^", "^reg^"-" is op=0x3b & reg; ind_abs=0 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (ea + idx);
   set_cc_compare(r0, m);
@@ -2109,7 +2194,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 :COMA "r0, *"^absaddr^", "^reg^"-" is op=0x3b & reg; ind_abs=1 & idx_ctrl=2 & ahigh & alow
     [ absaddr = (ahigh << 8) | alow; ] {
   reg = reg - 1;
-  local ea:2 = (ahigh << 8) | alow;
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   local m:1 = *[ram]:1 (base + idx);
