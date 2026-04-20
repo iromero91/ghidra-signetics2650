@@ -16,6 +16,7 @@ define register offset=0x30 size=1 [ page_latch ];
 define bitrange cc1 = psl[7,1];
 define bitrange cc0 = psl[6,1];
 define bitrange idc = psl[5,1];
+define bitrange rs  = psl[4,1];
 define bitrange wc  = psl[3,1];
 define bitrange ovf = psl[2,1];
 define bitrange com = psl[1,1];
@@ -28,6 +29,18 @@ define bitrange ii  = psu[3,1];
 define context
   page_latch
 ;
+
+macro swap_rs_banks() {
+  local t1:1 = r1;
+  local t2:1 = r2;
+  local t3:1 = r3;
+  r1 = r1p;
+  r2 = r2p;
+  r3 = r3p;
+  r1p = t1;
+  r2p = t2;
+  r3p = t3;
+}
 
 macro set_cc(val) {
   local is_neg:1 = (val s< 0);
@@ -319,31 +332,31 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # idx_ctrl=1/2/3: indexed, destination forced to r0, reg is the index register
 
 # Non-indexed direct: rn = *(abs)
-:LODA reg, ABSDATADST is op=0x03 & reg; idx_ctrl=0 & ABSDATADST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+:LODA reg, ABSDATADST is op=0x03 & reg; idx_ctrl=0 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   reg = *[ram]:1 ea;
   set_cc(reg);
 }
 
 # Non-indexed indirect: rn = *(*(abs))
-:LODA reg, ABSDATAINDDST is op=0x03 & reg; idx_ctrl=0 & ABSDATAINDDST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+:LODA reg, ABSDATAINDDST is op=0x03 & reg; idx_ctrl=0 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local indir:2 = *[ram]:2 ea;
   reg = *[ram]:1 indir;
   set_cc(reg);
 }
 
 # Indexed-only direct: r0 = *(abs + rn)
-:LODA "r0, "^ABSDATADST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATADST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+:LODA "r0, "^ABSDATADST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Indexed-only indirect: r0 = *(*(abs) + rn)
-:LODA "r0, *"^ABSDATAINDDST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATAINDDST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+:LODA "r0, *"^ABSDATAINDDST^", "^reg is op=0x03 & reg; idx_ctrl=3 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -351,18 +364,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 }
 
 # Pre-increment direct: ++rn; r0 = *(abs + rn)
-:LODA "r0, "^ABSDATADST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATADST {
+:LODA "r0, "^ABSDATADST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATADST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Pre-increment indirect: ++rn; r0 = *(*(abs) + rn)
-:LODA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATAINDDST {
+:LODA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x03 & reg; idx_ctrl=1 & ABSDATAINDDST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -370,18 +383,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 }
 
 # Pre-decrement direct: --rn; r0 = *(abs + rn)
-:LODA "r0, "^ABSDATADST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATADST {
+:LODA "r0, "^ABSDATADST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATADST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (ea + idx);
   set_cc(r0);
 }
 
 # Pre-decrement indirect: --rn; r0 = *(*(abs) + rn)
-:LODA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATAINDDST {
+:LODA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x03 & reg; idx_ctrl=2 & ABSDATAINDDST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   r0 = *[ram]:1 (base + idx);
@@ -417,62 +430,62 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # idx_ctrl=1/2/3: indexed mode, source forced to r0 and reg is index register
 
 # Non-indexed direct: *(abs) = rn
-:STRA reg, ABSDATADST is op=0x33 & reg; idx_ctrl=0 & ABSDATADST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+:STRA reg, ABSDATADST is op=0x33 & reg; idx_ctrl=0 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   *[ram]:1 ea = reg;
 }
 
 # Non-indexed indirect: *(*(abs)) = rn
-:STRA reg, ABSDATAINDDST is op=0x33 & reg; idx_ctrl=0 & ABSDATAINDDST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+:STRA reg, ABSDATAINDDST is op=0x33 & reg; idx_ctrl=0 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local ptr:2 = *[ram]:2 ea;
   *[ram]:1 ptr = reg;
 }
 
 # Indexed-only direct: *(abs + rn) = r0
-:STRA "r0, "^ABSDATADST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATADST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+:STRA "r0, "^ABSDATADST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATADST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Indexed-only indirect: *(*(abs) + rn) = r0
-:STRA "r0, *"^ABSDATAINDDST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATAINDDST {
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+:STRA "r0, *"^ABSDATAINDDST^", "^reg is op=0x33 & reg; idx_ctrl=3 & ABSDATAINDDST & ahigh & alow {
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
 }
 
 # Pre-increment direct: ++rn; *(abs + rn) = r0
-:STRA "r0, "^ABSDATADST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATADST {
+:STRA "r0, "^ABSDATADST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATADST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Pre-increment indirect: ++rn; *(*(abs) + rn) = r0
-:STRA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATAINDDST {
+:STRA "r0, *"^ABSDATAINDDST^", "^reg^"+" is op=0x33 & reg; idx_ctrl=1 & ABSDATAINDDST & ahigh & alow {
   reg = reg + 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
 }
 
 # Pre-decrement direct: --rn; *(abs + rn) = r0
-:STRA "r0, "^ABSDATADST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATADST {
+:STRA "r0, "^ABSDATADST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATADST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATADST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local idx:2 = zext(reg);
   *[ram]:1 (ea + idx) = r0;
 }
 
 # Pre-decrement indirect: --rn; *(*(abs) + rn) = r0
-:STRA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATAINDDST {
+:STRA "r0, *"^ABSDATAINDDST^", "^reg^"-" is op=0x33 & reg; idx_ctrl=2 & ABSDATAINDDST & ahigh & alow {
   reg = reg - 1;
-  local ea:2 = (zext(page_latch:1) << 13) | (ABSDATAINDDST & 0x1fff);
+  local ea:2 = ((inst_start >> 13) << 13) | (ahigh << 8) | alow;
   local base:2 = *[ram]:2 ea;
   local idx:2 = zext(reg);
   *[ram]:1 (base + idx) = r0;
@@ -2050,7 +2063,12 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # LPSL: load PSL from r0 (includes CC bits from r0[7:6]).
 # Encoding: 10010011  ($93)
 :LPSL is byte=0x93 {
+  local oldrs:1 = rs;
   psl = r0;
+  local newrs:1 = (r0 >> 4) & 1;
+  if (oldrs == newrs) goto <done>;
+  swap_rs_banks();
+<done>
 }
 
 # TPSU v: test PSU selective bits under mask.
@@ -2075,7 +2093,13 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # CPSL v: clear selected PSL bits.
 # Encoding: 01110101 vvvvvvvv  ($75)
 :CPSL imm8 is byte=0x75; imm8 {
-  psl = psl & ~imm8:1;
+  local oldrs:1 = rs;
+  local newpsl:1 = psl & ~imm8:1;
+  psl = newpsl;
+  local newrs:1 = (newpsl >> 4) & 1;
+  if (oldrs == newrs) goto <done>;
+  swap_rs_banks();
+<done>
 }
 
 # PPSU v: set selected mutable PSU bits.
@@ -2088,7 +2112,13 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # PPSL v: set selected PSL bits.
 # Encoding: 01110111 vvvvvvvv  ($77)
 :PPSL imm8 is byte=0x77; imm8 {
-  psl = psl | imm8:1;
+  local oldrs:1 = rs;
+  local newpsl:1 = psl | imm8:1;
+  psl = newpsl;
+  local newrs:1 = (newpsl >> 4) & 1;
+  if (oldrs == newrs) goto <done>;
+  swap_rs_banks();
+<done>
 }
 
 
