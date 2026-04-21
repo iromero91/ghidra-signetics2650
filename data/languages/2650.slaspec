@@ -17,8 +17,7 @@ define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
 define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
 define register offset=0x30 size=1 [ page_latch ];
 
-define bitrange cc1 = psl[7,1];
-define bitrange cc0 = psl[6,1];
+define bitrange cc  = psl[6,2];
 define bitrange idc = psl[5,1];
 define bitrange rs  = psl[4,1];
 define bitrange wc  = psl[3,1];
@@ -47,10 +46,9 @@ macro swap_rs_banks() {
 }
 
 macro set_cc(val) {
-  local is_neg:1 = (val s< 0);
-  local is_nz:1 = (val != 0);
-  cc1 = is_neg;
-  cc0 = is_nz & ~is_neg;
+  local gt:1 = (val s> 0);
+  local lt:1 = (val s< 0);
+  cc = (lt << 1) | gt;
 }
 
 macro add8_set_flags(dst, src) {
@@ -167,18 +165,19 @@ macro ior8_set_cc(dst, src) {
 
 macro set_cc_compare(lhs, rhs) {
   # COM=1 -> logical (unsigned) compare, COM=0 -> arithmetic (signed) compare.
-  local eq:1 = (lhs == rhs);
+  local gt_signed:1 = (lhs s> rhs);
+  local gt_logical:1 = (lhs > rhs);
+  local gt:1 = (gt_signed & ~com) | (gt_logical & com);
   local lt_signed:1 = (lhs s< rhs);
   local lt_logical:1 = (lhs < rhs);
   local lt:1 = (lt_signed & ~com) | (lt_logical & com);
-  cc1 = (~eq) & lt;
-  cc0 = (~eq) & ~lt;
+  cc = (lt << 1) | gt;
 }
 
 macro set_cc_test_under_mask(val, mask) {
   local t:1 = val & mask;
-  cc1 = (t != mask);
-  cc0 = 0;
+  local neq:1 = (t != mask);
+  cc = neq << 1;
 }
 
 
@@ -1134,7 +1133,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTR,eq rel
 :BCTR "eq, "^RELDST is byte=0x18; RELDST {
-  if ((cc1 | cc0) != 0) goto <done>;
+  if (cc != 0) goto <done>;
   iar = &RELDST;
   goto RELDST;
 <done>
@@ -1142,8 +1141,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTR,gt rel
 :BCTR "gt, "^RELDST is byte=0x19; RELDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   iar = &RELDST;
   goto RELDST;
 <done>
@@ -1151,8 +1149,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTR,lt rel
 :BCTR "lt, "^RELDST is byte=0x1a; RELDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   iar = &RELDST;
   goto RELDST;
 <done>
@@ -1166,24 +1163,21 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTR,eq *rel
 :BCTR "eq, "^RELINDDST is byte=0x18; RELINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   goto [RELINDDST];
 <done>
 }
 
 # BCTR,gt *rel
 :BCTR "gt, "^RELINDDST is byte=0x19; RELINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   goto [RELINDDST];
 <done>
 }
 
 # BCTR,lt *rel
 :BCTR "lt, "^RELINDDST is byte=0x1a; RELINDDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   goto [RELINDDST];
 <done>
 }
@@ -1198,8 +1192,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,eq abs
 :BCTA "eq, "^BRABSDST is byte=0x1c; BRABSDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1208,8 +1201,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,gt abs
 :BCTA "gt, "^BRABSDST is byte=0x1d; BRABSDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1218,8 +1210,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,lt abs
 :BCTA "lt, "^BRABSDST is byte=0x1e; BRABSDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1235,8 +1226,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,eq *abs
 :BCTA "eq, "^BRABSINDDST is byte=0x1c; BRABSINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1245,8 +1235,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,gt *abs
 :BCTA "gt, "^BRABSINDDST is byte=0x1d; BRABSINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1255,8 +1244,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCTA,lt *abs
 :BCTA "lt, "^BRABSINDDST is byte=0x1e; BRABSINDDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1276,54 +1264,42 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFR,eq rel  (branch if CC != eq)
 :BCFR "eq, "^RELDST is byte=0x98; RELDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   goto RELDST;
 <done>
 }
 
 # BCFR,gt rel  (branch if CC != gt)
 :BCFR "gt, "^RELDST is byte=0x99; RELDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   goto RELDST;
 <done>
 }
 
 # BCFR,lt rel  (branch if CC != lt)
 :BCFR "lt, "^RELDST is byte=0x9a; RELDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   goto RELDST;
 <done>
 }
 
 # BCFR,eq *rel
 :BCFR "eq, "^RELINDDST is byte=0x98; RELINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   goto [RELINDDST];
 <done>
 }
 
 # BCFR,gt *rel
 :BCFR "gt, "^RELINDDST is byte=0x99; RELINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   goto [RELINDDST];
 <done>
 }
 
 # BCFR,lt *rel
 :BCFR "lt, "^RELINDDST is byte=0x9a; RELINDDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   goto [RELINDDST];
 <done>
 }
@@ -1335,9 +1311,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,eq abs  (branch if CC != eq)
 :BCFA "eq, "^BRABSDST is byte=0x9c; BRABSDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1346,9 +1320,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,gt abs  (branch if CC != gt)
 :BCFA "gt, "^BRABSDST is byte=0x9d; BRABSDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1357,9 +1329,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,lt abs  (branch if CC != lt)
 :BCFA "lt, "^BRABSDST is byte=0x9e; BRABSDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   goto BRABSDST;
@@ -1368,9 +1338,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,eq *abs
 :BCFA "eq, "^BRABSINDDST is byte=0x9c; BRABSINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1379,9 +1347,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,gt *abs
 :BCFA "gt, "^BRABSINDDST is byte=0x9d; BRABSINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1390,9 +1356,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BCFA,lt *abs
 :BCFA "lt, "^BRABSINDDST is byte=0x9e; BRABSINDDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   goto [BRABSINDDST];
@@ -1568,24 +1532,21 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTR,eq rel
 :BSTR "eq, "^RELDST is byte=0x38; RELDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   call RELDST;
 <done>
 }
 
 # BSTR,gt rel
 :BSTR "gt, "^RELDST is byte=0x39; RELDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   call RELDST;
 <done>
 }
 
 # BSTR,lt rel
 :BSTR "lt, "^RELDST is byte=0x3a; RELDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   call RELDST;
 <done>
 }
@@ -1597,24 +1558,21 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTR,eq *rel
 :BSTR "eq, "^RELINDDST is byte=0x38; RELINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   call [RELINDDST];
 <done>
 }
 
 # BSTR,gt *rel
 :BSTR "gt, "^RELINDDST is byte=0x39; RELINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   call [RELINDDST];
 <done>
 }
 
 # BSTR,lt *rel
 :BSTR "lt, "^RELINDDST is byte=0x3a; RELINDDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   call [RELINDDST];
 <done>
 }
@@ -1630,8 +1588,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,eq abs
 :BSTA "eq, "^BRABSDST is byte=0x3c; BRABSDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1640,8 +1597,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,gt abs
 :BSTA "gt, "^BRABSDST is byte=0x3d; BRABSDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1650,8 +1606,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,lt abs
 :BSTA "lt, "^BRABSDST is byte=0x3e; BRABSDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1667,8 +1622,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,eq *abs
 :BSTA "eq, "^BRABSINDDST is byte=0x3c; BRABSINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1677,8 +1631,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,gt *abs
 :BSTA "gt, "^BRABSINDDST is byte=0x3d; BRABSINDDST {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1687,8 +1640,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSTA,lt *abs
 :BSTA "lt, "^BRABSINDDST is byte=0x3e; BRABSINDDST {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1707,54 +1659,42 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFR,eq rel  (call if CC != eq)
 :BSFR "eq, "^RELDST is byte=0xb8; RELDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   call RELDST;
 <done>
 }
 
 # BSFR,gt rel  (call if CC != gt)
 :BSFR "gt, "^RELDST is byte=0xb9; RELDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   call RELDST;
 <done>
 }
 
 # BSFR,lt rel  (call if CC != lt)
 :BSFR "lt, "^RELDST is byte=0xba; RELDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   call RELDST;
 <done>
 }
 
 # BSFR,eq *rel
 :BSFR "eq, "^RELINDDST is byte=0xb8; RELINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   call [RELINDDST];
 <done>
 }
 
 # BSFR,gt *rel
 :BSFR "gt, "^RELINDDST is byte=0xb9; RELINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   call [RELINDDST];
 <done>
 }
 
 # BSFR,lt *rel
 :BSFR "lt, "^RELINDDST is byte=0xba; RELINDDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   call [RELINDDST];
 <done>
 }
@@ -1765,9 +1705,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,eq abs  (call if CC != eq)
 :BSFA "eq, "^BRABSDST is byte=0xbc; BRABSDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1776,9 +1714,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,gt abs  (call if CC != gt)
 :BSFA "gt, "^BRABSDST is byte=0xbd; BRABSDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1787,9 +1723,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,lt abs  (call if CC != lt)
 :BSFA "lt, "^BRABSDST is byte=0xbe; BRABSDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   local pgbits:2 = BRABSDST >> 13;
   page_latch = pgbits:1;
   call BRABSDST;
@@ -1798,9 +1732,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,eq *abs
 :BSFA "eq, "^BRABSINDDST is byte=0xbc; BRABSINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 0) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1809,9 +1741,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,gt *abs
 :BSFA "gt, "^BRABSINDDST is byte=0xbd; BRABSINDDST {
-  if (cc1 != 0) goto <take>;
-  if (cc0 != 0) goto <done>;
-<take>
+  if (cc == 1) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1820,9 +1750,7 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # BSFA,lt *abs
 :BSFA "lt, "^BRABSINDDST is byte=0xbe; BRABSINDDST {
-  if (cc1 == 0) goto <take>;
-  if (cc0 == 0) goto <done>;
-<take>
+  if (cc == 2) goto <done>;
   local pgbits:2 = BRABSINDDST >> 13;
   page_latch = pgbits:1;
   call [BRABSINDDST];
@@ -1907,22 +1835,19 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Pops RAS and branches back when CC matches v; v=3 is unconditional.
 
 :RETC "eq" is byte=0x14 {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   return [ras0];
 <done>
 }
 
 :RETC "gt" is byte=0x15 {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   return [ras0];
 <done>
 }
 
 :RETC "lt" is byte=0x16 {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   return [ras0];
 <done>
 }
@@ -1936,24 +1861,21 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 # Same as RETC but also clears II (interrupt inhibit) bit in PSU on return.
 
 :RETE "eq" is byte=0x34 {
-  if (cc1 != 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 0) goto <done>;
   ii = 0;
   return [ras0];
 <done>
 }
 
 :RETE "gt" is byte=0x35 {
-  if (cc1 != 0) goto <done>;
-  if (cc0 == 0) goto <done>;
+  if (cc != 1) goto <done>;
   ii = 0;
   return [ras0];
 <done>
 }
 
 :RETE "lt" is byte=0x36 {
-  if (cc1 == 0) goto <done>;
-  if (cc0 != 0) goto <done>;
+  if (cc != 2) goto <done>;
   ii = 0;
   return [ras0];
 <done>
