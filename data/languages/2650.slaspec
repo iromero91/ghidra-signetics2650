@@ -17,6 +17,7 @@ define register offset=0x00 size=1 [ r0 r1 r2 r3 r1p r2p r3p ir hr psu psl ];
 define register offset=0x20 size=2 [ iar oar ras0 ras1 ras2 ras3 ras4 ras5 ras6 ras7 ];
 define register offset=0x30 size=1 [ page_latch ];
 
+# CC encoding in PSL[7:6]: 0=eq, 1=gt, 2=lt, 3=manual/invalid (not produced by set_cc* macros).
 define bitrange cc  = psl[6,2];
 define bitrange idc = psl[5,1];
 define bitrange rs  = psl[4,1];
@@ -46,6 +47,7 @@ macro swap_rs_banks() {
 }
 
 macro set_cc(val) {
+  # Derived from signed relation against zero.
   local gt:1 = (val s> 0);
   local lt:1 = (val s< 0);
   cc = (lt << 1) | gt;
@@ -165,6 +167,7 @@ macro ior8_set_cc(dst, src) {
 
 macro set_cc_compare(lhs, rhs) {
   # COM=1 -> logical (unsigned) compare, COM=0 -> arithmetic (signed) compare.
+  # Encode result into CC with the same mapping as set_cc.
   local gt_signed:1 = (lhs s> rhs);
   local gt_logical:1 = (lhs > rhs);
   local gt:1 = (gt_signed & ~com) | (gt_logical & com);
@@ -176,6 +179,7 @@ macro set_cc_compare(lhs, rhs) {
 
 macro set_cc_test_under_mask(val, mask) {
   local t:1 = val & mask;
+  # Test-under-mask only distinguishes eq/not-eq; not-eq is encoded as lt.
   local neq:1 = (t != mask);
   cc = neq << 1;
 }
@@ -1986,13 +1990,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # CPSL v: clear selected PSL bits.
 # Encoding: 01110101 vvvvvvvv  ($75)
+# RS bank swap is only checked when bit4 is selected by the immediate mask.
 :CPSL imm8 is byte=0x75; imm8 {
+  if ((imm8:1 & 0x10) == 0) goto <no_swap_check>;
   local oldrs:1 = rs;
   local newpsl:1 = psl & ~imm8:1;
   psl = newpsl;
   local newrs:1 = (newpsl >> 4) & 1;
   if (oldrs == newrs) goto <done>;
   swap_rs_banks();
+  goto <done>;
+<no_swap_check>
+  psl = psl & ~imm8:1;
 <done>
 }
 
@@ -2005,13 +2014,18 @@ ZEROINDDST: "*"^reladdr is ind=1 & rel7 [ reladdr = rel7 & 0x1fff; ] {
 
 # PPSL v: set selected PSL bits.
 # Encoding: 01110111 vvvvvvvv  ($77)
+# RS bank swap is only checked when bit4 is selected by the immediate mask.
 :PPSL imm8 is byte=0x77; imm8 {
+  if ((imm8:1 & 0x10) == 0) goto <no_swap_check>;
   local oldrs:1 = rs;
   local newpsl:1 = psl | imm8:1;
   psl = newpsl;
   local newrs:1 = (newpsl >> 4) & 1;
   if (oldrs == newrs) goto <done>;
   swap_rs_banks();
+  goto <done>;
+<no_swap_check>
+  psl = psl | imm8:1;
 <done>
 }
 
